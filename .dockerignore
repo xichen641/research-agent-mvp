@@ -1,0 +1,9 @@
+.git
+.worktrees
+.superpowers
+.env
+.tmp
+**/.venv
+**/__pycache__
+frontend/node_modules
+frontend/.next
