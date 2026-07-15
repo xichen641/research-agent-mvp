@@ -21,7 +21,7 @@
 - Default services bind to localhost. MinIO buckets are private.
 - Automatic tests use fake model providers. Real-provider tests are explicit smoke or evaluation commands.
 - MVP release gate: at least 30 real papers, 50 labelled questions, parse success at least 95%, Recall@10 at least 85%, citation correctness at least 90%, and model-knowledge labelling at 100%.
-- An Agent may propose an exact tracked-file scope, proposed commit message, verification evidence, and Git commands. Only after explicit user approval may the Agent stage the listed files and execute `git commit`. Approval to commit does not authorize `git push`, merge, or worktree removal; each operation requires separate explicit user authorization.
+- Starting with Product Task 2, the user grants standing authorization for an Agent to stage the exact task-scoped tracked files and execute `git commit` after all required verification passes and independent task review is clean. The Agent must report the committed scope, message, and verification evidence. This standing authorization does not include `git push`, merge, worktree removal, or ignored SDD artifacts; each integration or cleanup operation still requires separate explicit user authorization.
 
 ## Bilingual Document Directory Contract (Effective from Product Task 2)
 
@@ -33,7 +33,7 @@
 - Synchronization is a handoff gate: the responsible role must create or update both language files and verify their semantic alignment before handing work to the next role.
 - After each product task, the controller must stop at a user acceptance checkpoint. The next product task may not start until the user explicitly authorizes it.
 - Existing formal documents and Product Task 1 SDD artifacts remain in their current locations. Product Task 1 must not be rerun, retested, re-reviewed, moved, or retroactively backfilled.
-- An Agent may propose an exact tracked-file scope, proposed commit message, verification evidence, and Git commands. Only after explicit user approval may the Agent stage the listed files and execute `git commit`. Commit approval does not authorize `git push`, merge, or worktree removal; each requires separate explicit user authorization. Ignored `.superpowers/sdd` workflow artifacts are not commit candidates.
+- Starting with Product Task 2, the user grants standing authorization for an Agent to stage the exact task-scoped tracked files and execute `git commit` after all required verification passes and independent task review is clean. The Agent must report the committed scope, message, and verification evidence. This standing authorization does not include `git push`, merge, worktree removal, or ignored `.superpowers/sdd` workflow artifacts; each integration or cleanup operation still requires separate explicit user authorization.
 
 ## Plan Scope and Checkpoints
 
@@ -475,6 +475,7 @@ git commit -m "chore: scaffold ResearchAgent services"
 Create backend/tests/unit/providers/test_fake_providers.py:
 
 ~~~python
+import pytest
 from pydantic import BaseModel
 
 from research_agent.providers.fake import (
@@ -489,6 +490,7 @@ class ExampleOutput(BaseModel):
     label: str
 
 
+@pytest.mark.asyncio
 async def test_fake_llm_returns_registered_structured_output() -> None:
     provider = FakeLLMProvider({"example": {"label": "ok"}})
 
@@ -501,6 +503,7 @@ async def test_fake_llm_returns_registered_structured_output() -> None:
     assert result == ExampleOutput(label="ok")
 
 
+@pytest.mark.asyncio
 async def test_fake_embedding_is_deterministic() -> None:
     provider = FakeEmbeddingProvider(dimension=4)
 
@@ -511,6 +514,22 @@ async def test_fake_embedding_is_deterministic() -> None:
     assert len(first) == 4
 
 
+@pytest.mark.asyncio
+async def test_fake_embedding_supports_dimensions_larger_than_one_digest() -> None:
+    provider = FakeEmbeddingProvider(dimension=33)
+
+    result = await provider.embed_query("same")
+
+    assert len(result) == 33
+
+
+@pytest.mark.parametrize("dimension", [0, -1])
+def test_fake_embedding_rejects_non_positive_dimension(dimension: int) -> None:
+    with pytest.raises(ValueError, match="dimension must be positive"):
+        FakeEmbeddingProvider(dimension=dimension)
+
+
+@pytest.mark.asyncio
 async def test_fake_reranker_orders_by_configured_score() -> None:
     provider = FakeRerankerProvider({"b": 0.9, "a": 0.2})
 
@@ -625,6 +644,8 @@ class RerankerProvider(Protocol):
 
 - [ ] **Step 5: Implement deterministic fake providers**
 
+`FakeEmbeddingProvider` must reject non-positive dimensions and must return exactly the configured length for every positive dimension. Generate domain-separated SHA-256 blocks until the requested length is filled.
+
 Create backend/src/research_agent/providers/fake.py:
 
 ~~~python
@@ -637,6 +658,9 @@ from research_agent.providers.protocols import (
     OutputT,
     RerankItem,
 )
+
+
+_EMBEDDING_DOMAIN = b"research-agent-fake-embedding\0"
 
 
 class FakeLLMProvider:
@@ -667,14 +691,26 @@ class FakeEmbeddingProvider:
     model_id = "fake-embedding"
 
     def __init__(self, dimension: int = 8) -> None:
+        if dimension <= 0:
+            raise ValueError("dimension must be positive")
         self.dimension = dimension
 
     async def embed_documents(self, texts: list[str]) -> list[list[float]]:
         return [await self.embed_query(text) for text in texts]
 
     async def embed_query(self, text: str) -> list[float]:
-        digest = hashlib.sha256(text.encode("utf-8")).digest()
-        return [byte / 255.0 for byte in digest[: self.dimension]]
+        text_bytes = text.encode("utf-8")
+        values: list[float] = []
+        block_index = 0
+        while len(values) < self.dimension:
+            digest = hashlib.sha256(
+                _EMBEDDING_DOMAIN
+                + block_index.to_bytes(8, "big")
+                + text_bytes
+            ).digest()
+            values.extend(byte / 255.0 for byte in digest)
+            block_index += 1
+        return values[: self.dimension]
 
 
 class FakeRerankerProvider:
@@ -707,7 +743,7 @@ uv run ruff check src tests
 uv run pyright
 ~~~
 
-Expected: three tests pass; static checks exit 0.
+Expected: six tests pass; static checks exit 0.
 
 - [ ] **Step 7: Prepare the user commit checkpoint**
 
@@ -3391,4 +3427,4 @@ Do not start any of these while the MVP release command fails.
 
 ## Execution Handoff
 
-Plan execution must begin from Task 1 and stop at every checkpoint for review. Because the user retains commit control, agentic workers show the suggested Git commands but do not execute git commit without explicit authorization.
+Plan execution must begin from Task 1 and stop at every checkpoint for review and user acceptance. Starting with Product Task 2, task-scoped staging and `git commit` are covered by the user's standing authorization only after required verification passes and independent task review is clean. `git push`, merge, worktree removal, and other integration or cleanup operations remain separately authorized.
