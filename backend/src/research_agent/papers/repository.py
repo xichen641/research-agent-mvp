@@ -1,6 +1,8 @@
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from sqlalchemy import Select, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from research_agent.papers.domain import (
@@ -8,12 +10,16 @@ from research_agent.papers.domain import (
     DocumentRecord,
     DocumentStatus,
     DocumentVersionRecord,
+    DuplicateDocumentError,
+    PaperPersistenceError,
+    UploadIds,
     VersionStatus,
 )
 from research_agent.papers.models import (
     DocumentModel,
     DocumentTaskModel,
     DocumentVersionModel,
+    OutboxEventModel,
 )
 from research_agent.shared.ids import EntityId, new_id
 from research_agent.tasks.domain import TaskRecord, TaskStage, TaskStatus
@@ -55,6 +61,36 @@ class PaperRepository(Protocol):
     ) -> None: ...
 
     async def commit(self) -> None: ...
+
+
+@runtime_checkable
+class UploadPaperRepository(Protocol):
+    async def find_by_sha256(self, sha256: str) -> DocumentRecord | None: ...
+
+    async def create_upload(
+        self,
+        *,
+        ids: UploadIds,
+        title: str,
+        filename: str,
+        sha256: str,
+        source_object_key: str,
+        parser_name: str,
+        parser_version: str,
+        pipeline_version: str,
+    ) -> None: ...
+
+    async def add_outbox_event(
+        self,
+        *,
+        event_id: EntityId,
+        event_type: str,
+        payload: dict[str, object],
+    ) -> None: ...
+
+    async def commit(self) -> None: ...
+
+    async def rollback(self) -> None: ...
 
 
 class SqlPaperRepository:
@@ -115,6 +151,80 @@ class SqlPaperRepository:
 
         return CreatedDocument(document_id, version_id, task_id)
 
+    async def create_upload(
+        self,
+        *,
+        ids: UploadIds,
+        title: str,
+        filename: str,
+        sha256: str,
+        source_object_key: str,
+        parser_name: str,
+        parser_version: str,
+        pipeline_version: str,
+    ) -> None:
+        try:
+            document = DocumentModel(
+                id=ids.document_id,
+                title=title,
+                sha256=sha256,
+                status=DocumentStatus.PROCESSING,
+                current_version_id=None,
+            )
+            self._session.add(document)
+            await self._session.flush()
+
+            version = DocumentVersionModel(
+                id=ids.version_id,
+                document_id=ids.document_id,
+                filename=filename,
+                source_object_key=source_object_key,
+                parser_name=parser_name,
+                parser_version=parser_version,
+                pipeline_version=pipeline_version,
+                status=VersionStatus.PROCESSING,
+            )
+            self._session.add(version)
+            await self._session.flush()
+
+            self._session.add(
+                DocumentTaskModel(
+                    id=ids.task_id,
+                    document_version_id=ids.version_id,
+                    stage=TaskStage.QUEUED,
+                    status=TaskStatus.QUEUED,
+                    progress_current=0,
+                    progress_total=len(TaskStage),
+                    retry_count=0,
+                    error_code=None,
+                    error_message=None,
+                )
+            )
+            document.current_version_id = ids.version_id
+            await self._session.flush()
+        except IntegrityError as error:
+            if _constraint_name(error) == "uq_document_sha256_active":
+                raise DuplicateDocumentError(sha256) from error
+            raise PaperPersistenceError() from None
+
+    async def add_outbox_event(
+        self,
+        *,
+        event_id: EntityId,
+        event_type: str,
+        payload: dict[str, object],
+    ) -> None:
+        self._session.add(
+            OutboxEventModel(
+                id=event_id,
+                event_type=event_type,
+                payload=payload,
+                attempts=0,
+                available_at=datetime.now(UTC),
+                sent_at=None,
+            )
+        )
+
     async def get_document(self, document_id: EntityId) -> DocumentRecord | None:
         return await self._get_document_record(
             self._document_query().where(DocumentModel.id == document_id)
@@ -169,7 +279,13 @@ class SqlPaperRepository:
         document.status = status
 
     async def commit(self) -> None:
-        await self._session.commit()
+        try:
+            await self._session.commit()
+        except IntegrityError:
+            raise PaperPersistenceError() from None
+
+    async def rollback(self) -> None:
+        await self._session.rollback()
 
     @staticmethod
     def _document_query() -> Select[tuple[DocumentModel, EntityId]]:
@@ -223,8 +339,25 @@ def _task_record(model: DocumentTaskModel) -> TaskRecord:
     )
 
 
+def _constraint_name(error: IntegrityError) -> str | None:
+    current: BaseException | None = error.orig
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        constraint_name = getattr(current, "constraint_name", None)
+        if isinstance(constraint_name, str):
+            return constraint_name
+        current = current.__cause__ or current.__context__
+    return None
+
+
 if TYPE_CHECKING:
     def _paper_repository_conformance(
         repository: SqlPaperRepository,
     ) -> PaperRepository:
+        return repository
+
+    def _upload_repository_conformance(
+        repository: SqlPaperRepository,
+    ) -> UploadPaperRepository:
         return repository

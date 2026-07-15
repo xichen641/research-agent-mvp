@@ -1159,16 +1159,23 @@ git commit -m "feat: persist papers and processing tasks"
 
 **Files:**
 - Modify: backend/pyproject.toml
+- Modify: backend/uv.lock
+- Modify: backend/src/research_agent/papers/domain.py
+- Modify: backend/src/research_agent/papers/repository.py
 - Create: backend/src/research_agent/papers/storage.py
 - Create: backend/src/research_agent/papers/service.py
 - Create: backend/src/research_agent/papers/routes.py
 - Modify: backend/src/research_agent/main.py
 - Create: backend/tests/unit/papers/test_upload_service.py
+- Create: backend/tests/unit/papers/test_storage.py
+- Modify: backend/tests/integration/conftest.py
 - Create: backend/tests/integration/papers/test_upload_api.py
+- Create: backend/tests/integration/papers/test_upload_race.py
+- Create: backend/tests/integration/papers/test_minio_smoke.py
 
 **Interfaces:**
-- Consumes: PaperRepository, CreatedDocument, AppError, Settings
-- Produces: ObjectStorage, MinioObjectStorage, UploadPaperCommand, UploadReceipt, PaperService.upload_pdf, POST /api/v1/documents
+- Consumes: DocumentRecord, AppError, Settings, async_session_factory
+- Produces: UploadIds, DuplicateDocumentError, PaperPersistenceError, UploadPaperRepository, ObjectStorage, MinioObjectStorage, UploadPaperCommand, UploadReceipt, PaperService.upload_pdf, POST /api/v1/documents
 
 - [ ] **Step 1: Add object storage and multipart dependencies**
 
@@ -1182,15 +1189,55 @@ uv add minio python-multipart
 Create backend/tests/unit/papers/test_upload_service.py:
 
 ~~~python
+import hashlib
 from io import BytesIO
+from typing import BinaryIO
+from uuid import UUID
 
 import pytest
 
+from research_agent.papers.domain import DocumentRecord, DocumentStatus
 from research_agent.papers.service import PaperService, UploadPaperCommand
 from research_agent.shared.errors import AppError
 
 
-async def test_upload_rejects_non_pdf(fake_paper_repository, fake_object_storage) -> None:
+class FakePaperRepository:
+    def __init__(self) -> None:
+        self.existing: DocumentRecord | None = None
+        self.created: list[dict[str, object]] = []
+        self.outbox: list[dict[str, object]] = []
+        self.commit_calls = 0
+        self.rollback_calls = 0
+
+    async def find_by_sha256(self, sha256: str) -> DocumentRecord | None:
+        if self.existing is not None and self.existing.sha256 == sha256:
+            return self.existing
+        return None
+
+    async def commit(self) -> None:
+        self.commit_calls += 1
+
+    async def rollback(self) -> None:
+        self.rollback_calls += 1
+
+
+class FakeObjectStorage:
+    def __init__(self) -> None:
+        self.put_calls: list[str] = []
+        self.delete_calls: list[str] = []
+
+    def put(self, *, key: str, stream: BinaryIO, content_type: str) -> None:
+        del stream, content_type
+        self.put_calls.append(key)
+
+    def delete(self, *, key: str) -> None:
+        self.delete_calls.append(key)
+
+
+@pytest.mark.asyncio
+async def test_upload_rejects_non_pdf() -> None:
+    fake_paper_repository = FakePaperRepository()
+    fake_object_storage = FakeObjectStorage()
     service = PaperService(fake_paper_repository, fake_object_storage)
     command = UploadPaperCommand(
         filename="paper.txt",
@@ -1204,24 +1251,50 @@ async def test_upload_rejects_non_pdf(fake_paper_repository, fake_object_storage
     assert error.value.code == "INVALID_PDF"
 
 
-async def test_duplicate_hash_returns_existing_document(
-    fake_paper_repository,
-    fake_object_storage,
-) -> None:
-    fake_paper_repository.existing_sha256 = "hash"
+@pytest.mark.asyncio
+async def test_duplicate_hash_returns_existing_document() -> None:
+    fake_paper_repository = FakePaperRepository()
+    fake_object_storage = FakeObjectStorage()
+    content = b"%PDF-1.7\ncontent"
+    fake_paper_repository.existing = DocumentRecord(
+        id=UUID("00000000-0000-0000-0000-000000000001"),
+        title="existing",
+        sha256=hashlib.sha256(content).hexdigest(),
+        status=DocumentStatus.PROCESSING,
+        current_version_id=UUID("00000000-0000-0000-0000-000000000002"),
+        latest_task_id=UUID("00000000-0000-0000-0000-000000000003"),
+    )
     service = PaperService(fake_paper_repository, fake_object_storage)
 
     receipt = await service.upload_pdf(
         UploadPaperCommand(
             filename="paper.pdf",
             content_type="application/pdf",
-            stream=BytesIO(b"%PDF-1.7\ncontent"),
+            stream=BytesIO(content),
         )
     )
 
     assert receipt.duplicate is True
     assert fake_object_storage.put_calls == []
 ~~~
+
+The fake repository also implements the exact `create_upload` and
+`add_outbox_event` signatures defined in Step 5, appending their keyword
+arguments to `created` and `outbox`. The fake storage implements `get` and
+`presigned_get` with the exact ObjectStorage signatures. Tests instantiate
+these fakes directly; they must not depend on undeclared pytest fixtures.
+
+Add separate RED cases before implementation for:
+
+- `application/pdf` with a non-PDF signature;
+- successful upload creating one object, one document/version/task, one
+  `document.uploaded` outbox event, and one commit;
+- a persistence failure rolling back and deleting only the generated object;
+- `hash_stream` processing a stream larger than 1 MiB and restoring its original
+  position;
+- the MinIO adapter creating a missing bucket without installing an anonymous
+  bucket policy, and forwarding put/get/delete/presign calls to the configured
+  private bucket.
 
 - [ ] **Step 3: Run tests and verify the missing service failure**
 
@@ -1251,11 +1324,11 @@ class ObjectStorage(Protocol):
     def presigned_get(self, *, key: str, expires: timedelta) -> str: ...
 ~~~
 
-Create these command/result types in papers/service.py:
+Create `UploadIds` in papers/domain.py so the repository layer never imports the
+application service module:
 
 ~~~python
 from dataclasses import dataclass
-from typing import BinaryIO
 
 from research_agent.shared.ids import EntityId, new_id
 
@@ -1270,6 +1343,15 @@ class UploadIds:
     @classmethod
     def create(cls) -> "UploadIds":
         return cls(new_id(), new_id(), new_id(), new_id())
+~~~
+
+Create the command/result types in papers/service.py:
+
+~~~python
+from dataclasses import dataclass
+from typing import BinaryIO
+
+from research_agent.shared.ids import EntityId
 
 
 @dataclass(slots=True)
@@ -1286,6 +1368,17 @@ class UploadReceipt:
     task_id: EntityId
     duplicate: bool
 ~~~
+
+Define `DuplicateDocumentError` in papers/domain.py with the duplicate SHA-256
+value and define `PaperPersistenceError` for every other SQL integrity failure.
+These are persistence-neutral signals consumed by PaperService; do not expose
+SQLAlchemy `IntegrityError` outside the SQL repository.
+
+`MinioObjectStorage` accepts an injected `Minio` client and bucket name, plus a
+`from_settings(Settings)` constructor. Before the first write it idempotently
+creates a missing bucket. A newly created MinIO bucket is private by default;
+the adapter must never install an anonymous bucket policy. `get()` returns a
+binary stream whose `close()` also releases the MinIO HTTP response connection.
 
 - [ ] **Step 5: Implement upload validation, hashing, cleanup, and outbox creation**
 
@@ -1312,7 +1405,21 @@ async def add_outbox_event(
     event_type: str,
     payload: dict[str, object],
 ) -> None: ...
+
+async def rollback(self) -> None: ...
 ~~~
+
+Define a runtime-checkable `UploadPaperRepository` Protocol containing
+`find_by_sha256`, `create_upload`, `add_outbox_event`, `commit`, and `rollback`.
+`PaperService` depends only on this narrow protocol. `SqlPaperRepository`
+implements it with an explicit Pyright conformance witness; its existing
+`PaperRepository` conformance remains intact. `create_upload` inserts the document,
+version, and initial `QUEUED` task using the caller-provided IDs and flushes in
+the same unit of work. It catches only the PostgreSQL constraint
+`uq_document_sha256_active` and raises `DuplicateDocumentError(sha256)`; every
+other `IntegrityError` is wrapped as `PaperPersistenceError` without SQL or
+driver details. `add_outbox_event`
+adds the event with `attempts=0`, `available_at=now()` and `sent_at=None`.
 
 PaperService.upload_pdf must execute in this order:
 
@@ -1320,10 +1427,8 @@ PaperService.upload_pdf must execute in this order:
 async def upload_pdf(self, command: UploadPaperCommand) -> UploadReceipt:
     if command.content_type != "application/pdf":
         raise AppError(code="INVALID_PDF", message="Only PDF files are supported")
-    if command.stream.read(5) != b"%PDF-":
-        raise AppError(code="INVALID_PDF", message="File signature is not PDF")
     command.stream.seek(0)
-    sha256 = hash_stream(command.stream)
+    sha256 = await asyncio.to_thread(validate_and_hash_pdf, command.stream)
     command.stream.seek(0)
     existing = await self._papers.find_by_sha256(sha256)
     if existing is not None:
@@ -1335,7 +1440,12 @@ async def upload_pdf(self, command: UploadPaperCommand) -> UploadReceipt:
         )
     ids = UploadIds.create()
     key = "papers/" + str(ids.document_id) + "/source/" + str(ids.version_id) + ".pdf"
-    self._storage.put(key=key, stream=command.stream, content_type="application/pdf")
+    await asyncio.to_thread(
+        self._storage.put,
+        key=key,
+        stream=command.stream,
+        content_type="application/pdf",
+    )
     try:
         await self._papers.create_upload(
             ids=ids,
@@ -1353,8 +1463,33 @@ async def upload_pdf(self, command: UploadPaperCommand) -> UploadReceipt:
             payload={"version_id": str(ids.version_id), "task_id": str(ids.task_id)},
         )
         await self._papers.commit()
+    except DuplicateDocumentError:
+        await self._papers.rollback()
+        await asyncio.to_thread(self._storage.delete, key=key)
+        existing = await self._papers.find_by_sha256(sha256)
+        if existing is None:
+            raise AppError(
+                code="DUPLICATE_DOCUMENT_UNAVAILABLE",
+                message="The duplicate document could not be reloaded",
+                retryable=True,
+            )
+        return UploadReceipt(
+            document_id=existing.id,
+            version_id=existing.current_version_id,
+            task_id=existing.latest_task_id,
+            duplicate=True,
+        )
+    except PaperPersistenceError as error:
+        await self._papers.rollback()
+        await asyncio.to_thread(self._storage.delete, key=key)
+        raise AppError(
+            code="PERSISTENCE_ERROR",
+            message="The upload could not be persisted",
+            retryable=True,
+        ) from error
     except Exception:
-        self._storage.delete(key=key)
+        await self._papers.rollback()
+        await asyncio.to_thread(self._storage.delete, key=key)
         raise
     return UploadReceipt(
         document_id=ids.document_id,
@@ -1364,9 +1499,13 @@ async def upload_pdf(self, command: UploadPaperCommand) -> UploadReceipt:
     )
 ~~~
 
-The helper hash_stream reads in 1 MiB blocks and restores the original stream position.
+`validate_and_hash_pdf` seeks to offset zero, validates `%PDF-`, reads SHA-256 in
+1 MiB blocks, and restores the original stream position in `finally`, including
+when validation or reading raises. The complete validation/hash operation and
+all synchronous MinIO operations run through `asyncio.to_thread`; no upload
+stream or MinIO operation may block the event loop.
 
-If two equal PDFs pass the initial hash lookup concurrently, the unique active-sha256 constraint is authoritative: roll back the losing transaction, delete its generated MinIO object, reload the winning DocumentRecord in a fresh transaction, and return it with duplicate=True. Never expose the database IntegrityError to the caller.
+If two equal PDFs pass the initial hash lookup concurrently, the unique active-sha256 constraint is authoritative: roll back the losing transaction, delete its generated MinIO object, reload the winning DocumentRecord in the new transaction implicitly opened by the next repository query, and return it with duplicate=True. Never expose SQLAlchemy `IntegrityError` to PaperService, the route, or the caller. A two-session integration test must force both initial lookups to observe no existing document, then verify one first-upload receipt, one duplicate receipt with the winner's IDs, one durable document/version/task/outbox set, and deletion of the one generated key that differs from the durable winner key. The winner key must remain stored.
 
 - [ ] **Step 6: Add the upload route and error mapping**
 
@@ -1390,21 +1529,61 @@ async def upload_document(
 
 Map AppError to application/problem+json with code, message, retryable, trace_id, and details.
 
+Define explicit dependencies in papers/routes.py:
+
+- `get_db_session()` yields and closes one `AsyncSession` from
+  `async_session_factory`;
+- `get_object_storage()` builds a cached `MinioObjectStorage` from `Settings`;
+- `get_paper_service()` combines a request session and object storage;
+- tests override the database and object-storage dependencies, never production
+  globals.
+
+In main.py, install one lightweight HTTP middleware that accepts a non-empty
+`X-Trace-ID` header or generates `str(new_id())`, stores it at
+`request.state.trace_id`, and returns the same header. Register the papers router
+under `/api/v1`. Register an `AppError` exception handler returning status 400
+for `INVALID_PDF`, 503 for retryable errors, and 500 otherwise. Its
+`application/problem+json` body contains `type`, `title`, `status`, `code`,
+`message`, `retryable`, `trace_id`, and `details`.
+
+API integration tests use the migrated pgvector Testcontainer and an in-memory
+ObjectStorage override. They verify invalid MIME/signature responses, a valid
+202 response, durable document/version/task/outbox rows, duplicate IDs, no
+second object write, and matching response/body trace IDs.
+
 - [ ] **Step 7: Run unit and API integration tests**
 
 ~~~powershell
 Set-Location backend
-uv run pytest tests/unit/papers/test_upload_service.py tests/integration/papers/test_upload_api.py -v
+uv run pytest tests/unit/papers/test_upload_service.py tests/unit/papers/test_storage.py -v
+uv run pytest tests/integration/papers/test_upload_api.py tests/integration/papers/test_upload_race.py -v -m integration
+uv run pytest -q -p no:cacheprovider
 uv run ruff check src tests
 uv run pyright
+uv lock --check
 ~~~
 
 Expected: invalid files return 400, valid files return 202, duplicates return the original IDs, and only valid first uploads create MinIO objects.
 
+Run the real adapter smoke against Compose MinIO from the repository root. Use
+`MINIO_ENDPOINT=127.0.0.1:9000` only for this host-side command:
+
+~~~powershell
+docker compose -f infra/compose.yaml up -d minio
+Set-Location backend
+$env:MINIO_ENDPOINT = "127.0.0.1:9000"
+uv run pytest tests/integration/papers/test_minio_smoke.py -v -m integration
+Remove-Item Env:MINIO_ENDPOINT
+~~~
+
+The smoke test creates a unique object key, verifies authenticated put/get and a
+presigned URL, verifies anonymous bucket listing is denied, then deletes only
+its object. It never removes the shared bucket or unrelated objects.
+
 - [ ] **Step 8: Prepare the user commit checkpoint**
 
 ~~~powershell
-git add backend/pyproject.toml backend/uv.lock backend/src/research_agent/papers backend/src/research_agent/main.py backend/tests/unit/papers backend/tests/integration/papers
+git add backend/pyproject.toml backend/uv.lock backend/src/research_agent/papers backend/src/research_agent/main.py backend/tests/unit/papers backend/tests/integration/conftest.py backend/tests/integration/papers docs/superpowers/plans/2026-07-14-research-agent-mvp-implementation.md docs/superpowers/plans/2026-07-14-research-agent-mvp-implementation.zh-CN.md
 git commit -m "feat: upload and deduplicate PDF papers"
 ~~~
 

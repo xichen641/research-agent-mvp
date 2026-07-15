@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from enum import StrEnum
 
-from research_agent.shared.ids import EntityId
+from research_agent.shared.ids import EntityId, new_id
 
 
 class DocumentStatus(StrEnum):
@@ -18,6 +18,29 @@ class VersionStatus(StrEnum):
     READY = "READY"
     NEEDS_REVIEW = "NEEDS_REVIEW"
     FAILED = "FAILED"
+
+
+@dataclass(frozen=True, slots=True)
+class UploadIds:
+    document_id: EntityId
+    version_id: EntityId
+    task_id: EntityId
+    outbox_event_id: EntityId
+
+    @classmethod
+    def create(cls) -> "UploadIds":
+        return cls(new_id(), new_id(), new_id(), new_id())
+
+
+class DuplicateDocumentError(Exception):
+    def __init__(self, sha256: str) -> None:
+        super().__init__(f"active document with SHA-256 {sha256} already exists")
+        self.sha256 = sha256
+
+
+class PaperPersistenceError(Exception):
+    def __init__(self) -> None:
+        super().__init__("paper persistence failed")
 
 
 @dataclass(frozen=True, slots=True)

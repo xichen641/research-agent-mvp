@@ -112,20 +112,20 @@
 
 **目标：** 校验 PDF、计算哈希、去重、保存原文件，并在同一事务中创建任务和 Outbox 事件。
 
-**主要文件：** `papers/storage.py`、`papers/service.py`、`papers/routes.py`、上传单元测试和 API 集成测试。
+**主要文件：** `papers/domain.py`、`papers/repository.py`、`papers/storage.py`、`papers/service.py`、`papers/routes.py`、`main.py`、上传/存储单元测试和 API/并发集成测试。
 
-**输出接口：** `ObjectStorage`、`MinioObjectStorage`、`UploadPaperCommand`、`UploadReceipt`、`PaperService.upload_pdf`、`POST /api/v1/documents`。
+**输出接口：** `UploadIds`、`DuplicateDocumentError`、`PaperPersistenceError`、`ObjectStorage`、`MinioObjectStorage`、`UploadPaperCommand`、`UploadReceipt`、`PaperService.upload_pdf`、`POST /api/v1/documents`。
 
 - [ ] 步骤 1：安装 MinIO 和 multipart 依赖。
-- [ ] 步骤 2：编写非 PDF 与重复上传失败测试。
+- [ ] 步骤 2：用显式 Fake 编写 MIME、文件头、真实 SHA-256 去重、成功上传、失败清理、流位置恢复和 MinIO 适配器失败测试，不依赖未声明 fixture。
 - [ ] 步骤 3：运行测试，确认上传服务尚不存在。
-- [ ] 步骤 4：定义对象存储、上传 ID、命令和结果接口。
-- [ ] 步骤 5：实现 MIME、文件签名、SHA-256、MinIO 清理、数据库事务和 Outbox 创建。
-- [ ] 步骤 6：添加上传路由和 `application/problem+json` 错误映射。
-- [ ] 步骤 7：运行单元测试与 API 集成测试。
+- [ ] 步骤 4：把 `UploadIds` 和 `DuplicateDocumentError` 放入领域层，定义同步对象存储接口、命令和结果；MinIO 网络调用由异步 service 通过 `asyncio.to_thread` 执行。
+- [ ] 步骤 5：在线程中从偏移零执行 MIME/文件签名和 1 MiB 分块 SHA-256，建立私有 MinIO bucket、失败清理、数据库事务和 Outbox；仓储把 `uq_document_sha256_active` 转换为领域重复错误，把其他完整性错误包装成不泄露 SQL/driver 的 `PaperPersistenceError`，并提供 `rollback()`。
+- [ ] 步骤 6：添加显式数据库/对象存储/service 依赖、上传路由、请求 `trace_id`/`X-Trace-ID` 和 `application/problem+json` 错误映射。
+- [ ] 步骤 7：运行单元测试、API 集成测试和强制双请求先查空的并发去重测试；执行完整后端、Ruff、Pyright、锁文件检查和 Compose MinIO 私有 bucket 烟测。
 - [ ] 步骤 8：准备用户提交检查点。
 
-**关键约束：** 并发上传相同 PDF 时，以数据库唯一约束为准；失败方回滚事务、删除自己的 MinIO 对象并返回已有论文，不向用户暴露 `IntegrityError`。
+**关键约束：** 并发上传相同 PDF 时，以数据库唯一约束为准；失败方回滚事务、删除与持久胜方 key 不同的自己对象并在新事务中返回胜方论文，胜方对象必须保留；不向 service/API 暴露 SQLAlchemy `IntegrityError`；文件名不参与对象键；bucket 不安装匿名策略。大小、页数和扩展名限制仍属于 Task 18。
 
 ### 任务 5：通过 Redis 分发持久 Celery 任务
 

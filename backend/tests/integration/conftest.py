@@ -5,7 +5,12 @@ from alembic import command
 from alembic.config import Config
 import pytest
 import pytest_asyncio
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import (
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from testcontainers.postgres import PostgresContainer
 
 
@@ -40,3 +45,22 @@ async def db_session(migrated_database_url: str) -> AsyncIterator[AsyncSession]:
             if transaction.is_active:
                 await transaction.rollback()
     await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def independent_session_factory(
+    migrated_database_url: str,
+) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    engine = create_async_engine(migrated_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        yield factory
+    finally:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "TRUNCATE TABLE outbox_event, document_task, "
+                    "document_version, document CASCADE"
+                )
+            )
+        await engine.dispose()
