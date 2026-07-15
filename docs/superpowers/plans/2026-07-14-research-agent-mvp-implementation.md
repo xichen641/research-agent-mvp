@@ -1668,6 +1668,8 @@ celery_app = create_celery_app(get_settings().redis_url)
 
 Import get_settings from research_agent.config. When Task 15 adds note generation, extend imports with research_agent.notes.celery_tasks.
 
+Task 5 deliberately precedes the real ingestion orchestration completed in Task 7. Until Task 7 replaces it, register `process_document` as a safety bridge that calls `self.retry(countdown=60)` with task-level `max_retries=None`; it must never report successful processing or acknowledge-and-drop a paper job. Add a focused unit test proving the bridge raises Celery `Retry` and retains the same `version_id` in the retry path. This temporary bridge performs no PDF work and is removed when Task 7 installs the real pipeline entry point.
+
 - [ ] **Step 5: Implement the transactional outbox relay**
 
 OutboxRelay.run_once must:
@@ -1693,6 +1695,8 @@ async def run_once(self, limit: int = 20) -> int:
 ~~~
 
 Start a lightweight relay loop in FastAPI lifespan. It sleeps one second between runs and stops cleanly on shutdown. It performs no PDF work in the API process.
+
+The SQLAlchemy outbox repository must select due unsent rows with `FOR UPDATE SKIP LOCKED`, increment `attempts` after a broker send failure, and set `sent_at` only after `send_task` returns. Each lifespan pass owns a fresh async session/transaction; an unexpected pass failure is rolled back and logged without permanently killing the relay loop. Domain-facing relay interfaces expose project records and protocols rather than SQLAlchemy or Celery framework types.
 
 - [ ] **Step 6: Add worker service**
 

@@ -146,6 +146,10 @@
 
 **验收：** API 进程不执行 PDF 解析；Redis 不保存永久业务状态；Worker 同时监听 `paper_ingestion` 和 `note_generation`。
 
+**Task 5/Task 7 过渡约束：** Task 7 才会完成真实摄取编排。在此之前，`process_document` 必须注册为安全桥接任务：任务级 `max_retries=None`，并调用 `self.retry(countdown=60)`；它不得把尚未处理的论文任务报告为成功或确认后丢弃。聚焦单元测试必须证明该桥接任务抛出 Celery `Retry`，且重试路径保留原 `version_id`。Task 7 安装真实管线入口时移除此桥接逻辑。
+
+**Outbox 并发与生命周期约束：** SQLAlchemy Outbox 仓储只通过 `FOR UPDATE SKIP LOCKED` 领取到期且未发送的事件；Broker 发送失败后递增 `attempts`，仅在 `send_task` 返回后设置 `sent_at`。Lifespan 每轮使用新的异步 session/事务；意外失败必须回滚并记录，但不能永久终止 relay loop；关闭时干净取消。Relay 的领域侧接口只暴露项目记录和 Protocol，不暴露 SQLAlchemy 或 Celery 框架类型。
+
 ### 任务 6：用 Docling 生成带版本的解析产物
 
 **目标：** 将 Docling 隔离在解析适配器内，把 PDF 转换为项目自有的标准元素、Markdown、JSON 和质量报告。
