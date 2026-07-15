@@ -21,7 +21,19 @@
 - Default services bind to localhost. MinIO buckets are private.
 - Automatic tests use fake model providers. Real-provider tests are explicit smoke or evaluation commands.
 - MVP release gate: at least 30 real papers, 50 labelled questions, parse success at least 95%, Recall@10 at least 85%, citation correctness at least 90%, and model-knowledge labelling at 100%.
-- The user performs Git commits. Agentic workers may prepare and show exact Git commands but must not execute git commit unless the user explicitly authorizes it in that turn.
+- An Agent may propose an exact tracked-file scope, proposed commit message, verification evidence, and Git commands. Only after explicit user approval may the Agent stage the listed files and execute `git commit`. Approval to commit does not authorize `git push`, merge, or worktree removal; each operation requires separate explicit user authorization.
+
+## Bilingual Document Directory Contract (Effective from Product Task 2)
+
+- New formal specifications use `docs/superpowers/specs/EN/<same-filename>.md` and `docs/superpowers/specs/CN/<same-filename>.md`. New formal implementation plans use `docs/superpowers/plans/EN/<same-filename>.md` and `docs/superpowers/plans/CN/<same-filename>.md`.
+- SDD workflow artifacts use `.superpowers/sdd/EN/task-N-{brief,report,review}.md` and `.superpowers/sdd/CN/task-N-{brief,report,review}.md`; progress uses `.superpowers/sdd/EN/progress.md` and `.superpowers/sdd/CN/progress.md`. Corresponding English and Chinese files use the same filename and do not use a `.zh-CN` suffix.
+- English is the canonical source. Chinese companions must faithfully preserve the English implementation meaning and must keep every code block, command, path, interface name, dependency version, hash, expected result, test evidence, raw log, and task boundary unchanged.
+- Each English document links to its Chinese companion with `../CN/<same-filename>`, and each Chinese document links to its English canonical source with `../EN/<same-filename>`.
+- The controller owns each bilingual Brief pair and the bilingual Progress pair. The implementer owns each bilingual Report pair. The reviewer owns each bilingual Review pair.
+- Synchronization is a handoff gate: the responsible role must create or update both language files and verify their semantic alignment before handing work to the next role.
+- After each product task, the controller must stop at a user acceptance checkpoint. The next product task may not start until the user explicitly authorizes it.
+- Existing formal documents and Product Task 1 SDD artifacts remain in their current locations. Product Task 1 must not be rerun, retested, re-reviewed, moved, or retroactively backfilled.
+- An Agent may propose an exact tracked-file scope, proposed commit message, verification evidence, and Git commands. Only after explicit user approval may the Agent stage the listed files and execute `git commit`. Commit approval does not authorize `git push`, merge, or worktree removal; each requires separate explicit user authorization. Ignored `.superpowers/sdd` workflow artifacts are not commit candidates.
 
 ## Plan Scope and Checkpoints
 
@@ -278,6 +290,7 @@ Create .gitignore:
 
 ~~~gitignore
 .env
+.worktrees/
 .venv/
 __pycache__/
 .pytest_cache/
@@ -455,7 +468,7 @@ git commit -m "chore: scaffold ResearchAgent services"
 
 **Interfaces:**
 - Consumes: Settings from Task 1
-- Produces: new_id, AppError, ChatTurn, GeneratedObject, LLMProvider, EmbeddingProvider, RerankerProvider, FakeLLMProvider, FakeEmbeddingProvider, FakeRerankerProvider
+- Produces: new_id, AppError, ChatTurn, LLMProvider, EmbeddingProvider, RerankerProvider, FakeLLMProvider, FakeEmbeddingProvider, FakeRerankerProvider
 
 - [ ] **Step 1: Write failing provider contract tests**
 
@@ -3198,8 +3211,8 @@ New-Item -ItemType Directory -Force -Path $resolved | Out-Null
 docker compose -f infra/compose.yaml exec -T postgres pg_dump -U research -Fc -f /tmp/research.dump research
 docker compose -f infra/compose.yaml cp postgres:/tmp/research.dump (Join-Path $resolved "research.dump")
 docker compose -f infra/compose.yaml exec -T postgres rm -f /tmp/research.dump
-$counts = docker compose -f infra/compose.yaml exec -T postgres psql -U research -d research -At -c "SELECT concat_ws(',', (SELECT count(*) FROM document), (SELECT count(*) FROM document_version), (SELECT count(*) FROM document_chunk), (SELECT count(*) FROM chat_session), (SELECT count(*) FROM message), (SELECT count(*) FROM citation), (SELECT count(*) FROM paper_note), (SELECT count(*) FROM note_revision));"
-Set-Content -LiteralPath (Join-Path $resolved "counts.csv") -Value "documents,versions,chunks,chats,messages,citations,notes,revisions`n$counts" -Encoding utf8
+$counts = docker compose -f infra/compose.yaml exec -T postgres psql -U research -d research -At -c "SELECT concat_ws(',', (SELECT count(*) FROM document), (SELECT count(*) FROM document_version), (SELECT count(*) FROM document_chunk), (SELECT count(*) FROM chat_session), (SELECT count(*) FROM chat_message), (SELECT count(*) FROM chat_run), (SELECT count(*) FROM paper_note), (SELECT count(*) FROM note_revision));"
+Set-Content -LiteralPath (Join-Path $resolved "counts.csv") -Value "documents,versions,chunks,chats,messages,runs,notes,revisions`n$counts" -Encoding utf8
 docker run --rm --entrypoint /bin/sh --mount "type=bind,source=$resolved,target=/backup" minio/mc -c 'mc alias set local http://host.docker.internal:9000 "$1" "$2" >/dev/null && mc mirror --overwrite local/research-agent /backup/minio' -- $MinioUser $MinioPassword
 Copy-Item -LiteralPath ".env" -Destination (Join-Path $resolved "env.backup") -ErrorAction Stop
 ~~~
@@ -3229,7 +3242,7 @@ docker run --rm --entrypoint /bin/sh --mount "type=bind,source=$resolved,target=
 Push-Location backend
 uv run alembic upgrade head
 Pop-Location
-$counts = docker compose -f infra/compose.yaml exec -T postgres psql -U research -d research -At -c "SELECT concat_ws(',', (SELECT count(*) FROM document), (SELECT count(*) FROM document_version), (SELECT count(*) FROM document_chunk), (SELECT count(*) FROM chat_session), (SELECT count(*) FROM message), (SELECT count(*) FROM citation), (SELECT count(*) FROM paper_note), (SELECT count(*) FROM note_revision));"
+$counts = docker compose -f infra/compose.yaml exec -T postgres psql -U research -d research -At -c "SELECT concat_ws(',', (SELECT count(*) FROM document), (SELECT count(*) FROM document_version), (SELECT count(*) FROM document_chunk), (SELECT count(*) FROM chat_session), (SELECT count(*) FROM chat_message), (SELECT count(*) FROM chat_run), (SELECT count(*) FROM paper_note), (SELECT count(*) FROM note_revision));"
 if (-not (Select-String -LiteralPath (Join-Path $resolved "counts.csv") -SimpleMatch $counts)) { throw "Restored counts do not match backup manifest" }
 docker compose -f infra/compose.yaml up -d api worker
 ~~~

@@ -355,7 +355,7 @@
 
 - [ ] 步骤 1：添加文件大小、页数、CORS、模型超时、任务软硬超时和 `/health/ready`。
 - [ ] 步骤 2：编写伪 PDF、错误 MIME、超大文件、路径穿越和 Prompt Injection 测试。
-- [ ] 步骤 3：实现 PostgreSQL Custom Dump、MinIO Mirror、计数清单和恢复脚本。
+- [ ] 步骤 3：实现 PostgreSQL Custom Dump、MinIO Mirror、计数清单和恢复脚本；聊天计数使用实际的 `chat_message` 与 `chat_run` 表，引用随消息 JSON 一起恢复。
 - [ ] 步骤 4：由用户选择至少 30 篇论文并审核至少 50 个问题及证据切片。
 - [ ] 步骤 5：编写上传到笔记保存的完整后端 E2E。
 - [ ] 步骤 6：建立统一 Windows 验证入口 `scripts/verify.ps1`。
@@ -397,7 +397,19 @@
 - 中文版本用于理解和跟踪；需要复制代码、SQL、Docker 配置或完整命令时，使用英文规范源中相同任务、相同步骤的代码块。
 - 修改英文计划时，必须同步更新中文计划的全局约束、任务编号、接口、步骤标题、检查点和验收门槛。
 - 修改中文解释但不改变实现含义时，不需要反向改动英文代码块。
-- Git 提交始终由用户执行，除非用户在当次对话中明确授权。
+- Agent 可以提出精确的跟踪文件范围、建议的提交消息、验证证据和 Git 命令。只有获得用户明确批准后，Agent 才可以暂存列出的文件并执行 `git commit`。提交批准不授权 `git push`、合并或移除工作树；每项操作都需要用户分别明确授权。
+
+## 双语文档目录约定（自产品任务 2 起生效）
+
+- 新的正式设计文档使用 `docs/superpowers/specs/EN/<相同文件名>.md` 和 `docs/superpowers/specs/CN/<相同文件名>.md`；新的正式实施计划使用 `docs/superpowers/plans/EN/<相同文件名>.md` 和 `docs/superpowers/plans/CN/<相同文件名>.md`。
+- SDD 工作流产物使用 `.superpowers/sdd/EN/task-N-{brief,report,review}.md` 和 `.superpowers/sdd/CN/task-N-{brief,report,review}.md`；进度文件使用 `.superpowers/sdd/EN/progress.md` 和 `.superpowers/sdd/CN/progress.md`。对应的英文和中文文件使用相同文件名，不再使用 `.zh-CN` 后缀。
+- 英文是规范源。中文配套文件必须忠实保持英文实现含义，并原样保留每个代码块、命令、路径、接口名称、依赖版本、哈希、预期结果、测试证据、原始日志和任务边界。
+- 每份英文文档通过 `../CN/<相同文件名>` 链接中文配套文件；每份中文文档通过 `../EN/<相同文件名>` 链接英文规范源。
+- 控制器负责每组双语 Brief 和双语 Progress；实现者负责每组双语 Report；审查者负责每组双语 Review。
+- 同步是交接门槛：负责角色必须创建或更新两种语言的文件并验证语义一致后，才能把工作交给下一个角色。
+- 每个产品任务完成后，控制器必须停在用户验收检查点。只有用户明确授权后，才能启动下一个产品任务。
+- 已有正式文档和产品任务 1 的 SDD 产物保留在当前路径。不得重新运行、重新测试、重新审查、移动产品任务 1，也不得为其追补产物。
+- Agent 可以提出精确的跟踪文件范围、建议的提交消息、验证证据和 Git 命令。只有获得用户明确批准后，Agent 才可以暂存列出的文件并执行 `git commit`。提交批准不授权 `git push`、合并或移除工作树；每项操作都需要用户分别明确授权。被忽略的 `.superpowers/sdd` 工作流产物不属于提交候选。
 
 ## 七、官方实现参考
 
