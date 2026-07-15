@@ -8,8 +8,12 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "alembic>=1.18.5",
+    "asyncpg>=0.31.0",
     "fastapi>=0.139.0",
+    "pgvector>=0.5.0",
     "pydantic-settings>=2.14.2",
+    "sqlalchemy>=2.0.51",
     "uvicorn[standard]>=0.51.0",
 ]
 
@@ -27,4 +31,10 @@ dev = [
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
     "ruff>=0.15.21",
+    "testcontainers[postgres]>=4.14.2",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: requires Docker-backed infrastructure",
 ]

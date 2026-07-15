@@ -93,20 +93,20 @@
 
 **目标：** 建立论文、版本、任务和 Outbox 的持久数据模型。
 
-**主要文件：** `shared/db.py`、`papers/domain.py`、`papers/models.py`、`papers/repository.py`、`tasks/domain.py`、`tasks/repository.py`、`migrations/versions/0001_papers_tasks.py`。
+**主要文件：** `alembic.ini`、`migrations/env.py`、`migrations/script.py.mako`、`migrations/versions/0001_papers_tasks.py`、`shared/db.py`、`papers/domain.py`、`papers/models.py`、`papers/repository.py`、`tasks/domain.py`、`tasks/repository.py`、`tests/integration/conftest.py` 和仓储集成测试。
 
-**输出接口：** `DocumentStatus`、`VersionStatus`、`TaskStage`、`TaskStatus`、`DocumentRecord`、`PaperRepository`、`TaskRepository`、`async_session_factory`。
+**输出接口：** `DocumentStatus`、`VersionStatus`、`TaskStage`、`TaskStatus`、`DocumentRecord`、`DocumentVersionRecord`、`TaskRecord`、`PaperRepository`、`TaskRepository`、`async_session_factory`。
 
-- [ ] 步骤 1：安装 SQLAlchemy、asyncpg、Alembic、pgvector 和 Testcontainers。
-- [ ] 步骤 2：编写创建论文和版本的失败集成测试。
+- [ ] 步骤 1：安装 SQLAlchemy、asyncpg、Alembic、pgvector 和 `testcontainers[postgres]`，并注册 `integration` 测试标记。
+- [ ] 步骤 2：用 `pgvector/pgvector:pg17` Testcontainer 编写创建论文、版本和初始任务的失败集成测试；夹具执行两次 Alembic `upgrade head` 并为每个测试回滚外层事务。
 - [ ] 步骤 3：运行测试，确认领域模型和仓储尚不存在。
-- [ ] 步骤 4：定义论文与任务状态枚举和记录类型。
-- [ ] 步骤 5：建立 SQLAlchemy Model、`vector` 扩展、唯一索引和 Outbox 索引。
-- [ ] 步骤 6：实现论文与任务仓储方法。
-- [ ] 步骤 7：执行迁移并运行仓储测试。
+- [ ] 步骤 4：定义论文与任务状态枚举，以及 `CreatedDocument`、`DocumentRecord`、`DocumentVersionRecord` 和 `TaskRecord`；创建结果包含非空 `task_id`。
+- [ ] 步骤 5：补齐 Alembic 配置和模板，建立 SQLAlchemy Model、`vector` 扩展、唯一索引和 Outbox 索引。
+- [ ] 步骤 6：定义 `PaperRepository`、`TaskRepository` 协议并实现 SQL 仓储；创建论文时在同一工作单元内创建 `QUEUED` 初始任务。
+- [ ] 步骤 7：通过 `127.0.0.1` 对 Compose PostgreSQL 执行两次迁移和 heads 检查，再用隔离 Testcontainer 运行仓储测试及静态检查。
 - [ ] 步骤 8：准备用户提交检查点。
 
-**关键约束：** 活跃论文的 SHA-256 唯一；同一版本同一任务阶段唯一；当前版本和最近任务必须可以从 `DocumentRecord` 得到。
+**关键约束：** 活跃论文的 SHA-256 唯一；同一版本同一任务阶段唯一；当前版本和按 `(created_at DESC, id DESC)` 确定的最近任务必须可以从 `DocumentRecord` 得到；集成测试不得依赖 Compose 的持久状态。
 
 ### 任务 4：实现私有对象存储和幂等 PDF 上传
 

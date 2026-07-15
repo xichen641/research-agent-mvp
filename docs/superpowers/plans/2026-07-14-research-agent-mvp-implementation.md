@@ -758,6 +758,9 @@ git commit -m "feat: define model provider contracts"
 
 **Files:**
 - Modify: backend/pyproject.toml
+- Modify: backend/uv.lock
+- Create: backend/alembic.ini
+- Create: backend/migrations/script.py.mako
 - Create: backend/src/research_agent/shared/db.py
 - Create: backend/src/research_agent/papers/domain.py
 - Create: backend/src/research_agent/papers/models.py
@@ -766,6 +769,7 @@ git commit -m "feat: define model provider contracts"
 - Create: backend/src/research_agent/tasks/repository.py
 - Create: backend/migrations/env.py
 - Create: backend/migrations/versions/0001_papers_tasks.py
+- Create: backend/tests/integration/conftest.py
 - Create: backend/tests/integration/papers/test_repository.py
 
 **Interfaces:**
@@ -777,26 +781,49 @@ git commit -m "feat: define model provider contracts"
 ~~~powershell
 Set-Location backend
 uv add sqlalchemy asyncpg alembic pgvector
-uv add --dev testcontainers
+uv add --dev "testcontainers[postgres]"
 ~~~
 
-Expected: pyproject.toml and uv.lock include the new packages.
+Register the integration marker in backend/pyproject.toml so pytest does not emit
+an unknown-marker warning:
+
+~~~toml
+[tool.pytest.ini_options]
+markers = [
+    "integration: requires Docker-backed infrastructure",
+]
+~~~
+
+Expected: pyproject.toml and uv.lock include the new packages and pytest knows
+the integration marker.
 
 - [ ] **Step 2: Write the failing repository integration test**
+
+Create backend/tests/integration/conftest.py with these responsibilities:
+
+1. Start `pgvector/pgvector:pg17` through `PostgresContainer` and expose an
+   `asyncpg` SQLAlchemy URL. The Testcontainer is the authoritative database for
+   repository integration tests; it must not depend on the Compose project.
+2. Build an Alembic `Config` from backend/alembic.ini, inject the container URL,
+   and run `upgrade head` twice before yielding a session. The second upgrade
+   proves migration idempotency.
+3. Yield a function-scoped `AsyncSession` with
+   `join_transaction_mode="create_savepoint"`, then roll back the surrounding
+   connection transaction and dispose the engine.
 
 Create backend/tests/integration/papers/test_repository.py:
 
 ~~~python
-from io import BytesIO
-
 import pytest
 
-from research_agent.papers.domain import DocumentStatus
+from research_agent.papers.domain import DocumentStatus, VersionStatus
 from research_agent.papers.repository import SqlPaperRepository
+from research_agent.tasks.domain import TaskStage, TaskStatus
 
 
 @pytest.mark.integration
-async def test_create_document_and_version(db_session) -> None:
+@pytest.mark.asyncio
+async def test_create_document_version_and_initial_task(db_session) -> None:
     repository = SqlPaperRepository(db_session)
 
     created = await repository.create_document_with_version(
@@ -814,6 +841,19 @@ async def test_create_document_and_version(db_session) -> None:
     assert loaded is not None
     assert loaded.status is DocumentStatus.PROCESSING
     assert loaded.current_version_id == created.version_id
+    assert loaded.latest_task_id == created.task_id
+
+    version = await repository.get_version(created.version_id)
+    assert version is not None
+    assert version.status is VersionStatus.PROCESSING
+
+    task = await repository.get_task(created.task_id)
+    assert task is not None
+    assert task.stage is TaskStage.QUEUED
+    assert task.status is TaskStatus.QUEUED
+
+    duplicate_lookup = await repository.find_by_sha256("a" * 64)
+    assert duplicate_lookup == loaded
 ~~~
 
 - [ ] **Step 3: Run the test and confirm model imports fail**
@@ -856,6 +896,7 @@ class VersionStatus(StrEnum):
 class CreatedDocument:
     document_id: EntityId
     version_id: EntityId
+    task_id: EntityId
 
 
 @dataclass(frozen=True, slots=True)
@@ -866,12 +907,27 @@ class DocumentRecord:
     status: DocumentStatus
     current_version_id: EntityId
     latest_task_id: EntityId
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentVersionRecord:
+    id: EntityId
+    document_id: EntityId
+    filename: str
+    source_object_key: str
+    parser_name: str
+    parser_version: str
+    pipeline_version: str
+    status: VersionStatus
 ~~~
 
 Create backend/src/research_agent/tasks/domain.py:
 
 ~~~python
+from dataclasses import dataclass
 from enum import StrEnum
+
+from research_agent.shared.ids import EntityId
 
 
 class TaskStage(StrEnum):
@@ -891,9 +947,36 @@ class TaskStatus(StrEnum):
     READY = "READY"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
+
+
+@dataclass(frozen=True, slots=True)
+class TaskRecord:
+    id: EntityId
+    document_version_id: EntityId
+    stage: TaskStage
+    status: TaskStatus
+    progress_current: int
+    progress_total: int
+    retry_count: int
+    error_code: str | None
+    error_message: str | None
 ~~~
 
-- [ ] **Step 5: Create SQLAlchemy models and migration**
+- [ ] **Step 5: Create SQLAlchemy models and a complete Alembic environment**
+
+Define the shared declarative Base, async engine factory, and
+`async_session_factory` in backend/src/research_agent/shared/db.py. Production
+defaults continue to use `Settings.database_url`; tests may inject another URL.
+
+Create backend/alembic.ini and backend/migrations/script.py.mako as part of the
+Alembic environment. backend/migrations/env.py must:
+
+1. Import every model module before reading `Base.metadata`.
+2. Prefer an explicitly injected Alembic connection when present.
+3. Otherwise read `DATABASE_URL` through `Settings` and execute migrations via
+   an async SQLAlchemy engine.
+4. Support both `uv run alembic upgrade head` and the integration fixture's
+   programmatic upgrade.
 
 Implement models with these exact durable columns:
 
@@ -961,7 +1044,13 @@ ON outbox_event (available_at)
 WHERE sent_at IS NULL;
 ~~~
 
-- [ ] **Step 6: Implement repository methods**
+- [ ] **Step 6: Implement repository protocols and SQL repositories**
+
+Define runtime-checkable `PaperRepository` and `TaskRepository` Protocols. The
+paper protocol exposes every method shown below. The task protocol exposes
+`get_task`, `update_task`, and `commit`; concrete SQL repositories must satisfy
+the protocols under Pyright without importing FastAPI, Celery, MinIO, Docling,
+or LangChain types.
 
 Create SqlPaperRepository with these signatures:
 
@@ -986,6 +1075,13 @@ class SqlPaperRepository:
 
     async def find_by_sha256(self, sha256: str) -> DocumentRecord | None: ...
 
+    async def get_version(
+        self,
+        version_id: EntityId,
+    ) -> DocumentVersionRecord | None: ...
+
+    async def get_task(self, task_id: EntityId) -> TaskRecord | None: ...
+
     async def switch_current_version(
         self,
         document_id: EntityId,
@@ -996,25 +1092,64 @@ class SqlPaperRepository:
     async def commit(self) -> None: ...
 ~~~
 
-get_document and find_by_sha256 must join the current version and most recent document task so DocumentRecord always contains current_version_id and latest_task_id for uploaded documents.
+`create_document_with_version` must create a document, its first version, and an
+initial task in one unit of work. The task starts with `stage=QUEUED`,
+`status=QUEUED`, `progress_current=0`, and `progress_total=len(TaskStage)`. This
+makes the non-null `CreatedDocument.task_id` and `DocumentRecord.latest_task_id`
+valid immediately.
+
+`get_document` and `find_by_sha256` must join the current version and select the
+most recent document task deterministically by `(created_at DESC, id DESC)`.
+`get_version` and `get_task` return their complete record types. Implement
+`SqlTaskRepository` with these signatures:
+
+~~~python
+class SqlTaskRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def get_task(self, task_id: EntityId) -> TaskRecord | None: ...
+
+    async def update_task(
+        self,
+        task_id: EntityId,
+        *,
+        stage: TaskStage,
+        status: TaskStatus,
+        progress_current: int,
+        progress_total: int,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> None: ...
+
+    async def commit(self) -> None: ...
+~~~
 
 - [ ] **Step 7: Run migrations and repository tests**
 
 ~~~powershell
 docker compose -f infra/compose.yaml up -d postgres
 Set-Location backend
+$env:DATABASE_URL = "postgresql+asyncpg://research:research@127.0.0.1:5432/research"
 uv run alembic upgrade head
-uv run pytest tests/integration/papers/test_repository.py -v
+uv run alembic upgrade head
+uv run alembic current --check-heads
+Remove-Item Env:DATABASE_URL
+uv run pytest tests/integration/papers/test_repository.py -v -m integration
 uv run ruff check src tests
 uv run pyright
 ~~~
 
-Expected: migration applies once, re-running upgrade is a no-op, and repository test passes.
+Expected: Compose PostgreSQL is reachable from the host through `127.0.0.1`, the
+first migration applies, the second upgrade is a no-op, the current revision is
+at all heads, the isolated Testcontainer repository test passes, and static
+checks pass. Always remove the temporary host `DATABASE_URL` before running the
+Testcontainer test so it cannot accidentally use Compose.
 
 - [ ] **Step 8: Prepare the user commit checkpoint**
 
 ~~~powershell
-git add backend/pyproject.toml backend/uv.lock backend/alembic.ini backend/migrations backend/src/research_agent/shared/db.py backend/src/research_agent/papers backend/src/research_agent/tasks backend/tests/integration/papers
+git add backend/pyproject.toml backend/uv.lock backend/alembic.ini backend/migrations backend/src/research_agent/shared/db.py backend/src/research_agent/papers backend/src/research_agent/tasks backend/tests/integration/conftest.py backend/tests/integration/papers
 git commit -m "feat: persist papers and processing tasks"
 ~~~
 
