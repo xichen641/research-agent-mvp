@@ -1,18 +1,21 @@
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from sqlalchemy import Select, delete, select
+from sqlalchemy import Select, and_, delete, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from research_agent.papers.domain import (
     CreatedDocument,
+    DocumentDetailRecord,
     DocumentRecord,
+    DocumentSummaryRecord,
     DocumentStatus,
     DocumentVersionRecord,
     DuplicateDocumentError,
     PaperPersistenceError,
+    SafeDocumentVersionRecord,
     UploadIds,
     VersionStatus,
 )
@@ -55,6 +58,18 @@ class PaperRepository(Protocol):
     ) -> DocumentVersionRecord | None: ...
 
     async def get_task(self, task_id: EntityId) -> TaskRecord | None: ...
+
+    async def list_documents(
+        self,
+        *,
+        limit: int,
+        before_created_at: datetime | None = None,
+        before_id: EntityId | None = None,
+    ) -> list[DocumentSummaryRecord]: ...
+
+    async def get_document_detail(
+        self, document_id: EntityId
+    ) -> DocumentDetailRecord | None: ...
 
     async def switch_current_version(
         self,
@@ -303,6 +318,64 @@ class SqlPaperRepository:
             return None
         return _task_record(model)
 
+    async def list_documents(
+        self,
+        *,
+        limit: int,
+        before_created_at: datetime | None = None,
+        before_id: EntityId | None = None,
+    ) -> list[DocumentSummaryRecord]:
+        statement = self._document_query().where(
+            DocumentModel.status != DocumentStatus.DELETED
+        )
+        if before_created_at is not None and before_id is not None:
+            statement = statement.where(
+                or_(
+                    DocumentModel.created_at < before_created_at,
+                    and_(
+                        DocumentModel.created_at == before_created_at,
+                        DocumentModel.id < before_id,
+                    ),
+                )
+            )
+        statement = statement.order_by(
+            DocumentModel.created_at.desc(), DocumentModel.id.desc()
+        ).limit(limit)
+        try:
+            rows = (await self._session.execute(statement)).all()
+        except SQLAlchemyError as error:
+            raise PaperPersistenceError() from error
+        return [_document_summary(document, task_id) for document, task_id in rows]
+
+    async def get_document_detail(
+        self, document_id: EntityId
+    ) -> DocumentDetailRecord | None:
+        statement = (
+            self._document_query()
+            .add_columns(DocumentVersionModel)
+            .where(
+                DocumentModel.id == document_id,
+                DocumentModel.status != DocumentStatus.DELETED,
+            )
+        )
+        try:
+            row = (await self._session.execute(statement)).one_or_none()
+        except SQLAlchemyError as error:
+            raise PaperPersistenceError() from error
+        if row is None:
+            return None
+        document, latest_task_id, version = row
+        return DocumentDetailRecord(
+            summary=_document_summary(document, latest_task_id),
+            current_version=SafeDocumentVersionRecord(
+                id=version.id,
+                filename=version.filename,
+                status=VersionStatus(version.status),
+                pipeline_version=version.pipeline_version,
+                created_at=version.created_at,
+            ),
+        )
+
     async def switch_current_version(
         self,
         document_id: EntityId,
@@ -496,6 +569,22 @@ def _task_record(model: DocumentTaskModel) -> TaskRecord:
         retry_count=model.retry_count,
         error_code=model.error_code,
         error_message=model.error_message,
+    )
+
+
+def _document_summary(
+    model: DocumentModel, latest_task_id: EntityId
+) -> DocumentSummaryRecord:
+    if model.current_version_id is None:
+        raise PaperPersistenceError()
+    return DocumentSummaryRecord(
+        id=model.id,
+        title=model.title,
+        status=DocumentStatus(model.status),
+        current_version_id=model.current_version_id,
+        latest_task_id=latest_task_id,
+        created_at=model.created_at,
+        updated_at=model.updated_at,
     )
 
 

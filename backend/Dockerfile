@@ -5,5 +5,7 @@ COPY backend/pyproject.toml backend/uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 COPY backend/src ./src
 COPY backend/README.md ./README.md
+COPY backend/alembic.ini ./alembic.ini
+COPY backend/migrations ./migrations
 RUN uv sync --frozen --no-dev
-CMD ["uv", "run", "uvicorn", "research_agent.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uv", "run", "--no-dev", "uvicorn", "research_agent.main:app", "--host", "0.0.0.0", "--port", "8000"]

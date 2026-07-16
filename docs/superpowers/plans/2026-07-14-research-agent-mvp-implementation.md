@@ -2210,8 +2210,25 @@ git commit -m "feat: create structure-aware paper chunks"
 - Create: frontend/src/features/papers/task-progress.tsx
 - Create: frontend/src/app/papers/page.tsx
 - Modify: backend/src/research_agent/papers/routes.py
+- Modify: backend/src/research_agent/papers/domain.py
+- Modify: backend/src/research_agent/papers/repository.py
+- Create: backend/src/research_agent/tasks/routes.py
+- Create: backend/src/research_agent/tasks/service.py
+- Modify: backend/src/research_agent/tasks/repository.py
+- Modify: backend/src/research_agent/main.py
+- Modify: backend/src/research_agent/config.py
+- Modify: backend/Dockerfile
+- Modify: infra/compose.yaml
+- Modify: .env.example
 - Create: frontend/src/features/papers/upload-panel.test.tsx
+- Create: frontend/src/features/papers/task-progress.test.tsx
+- Create: backend/tests/contract/test_paper_task_api.py
+- Create: frontend/vitest.config.mts
+- Create: frontend/vitest.setup.ts
+- Create: frontend/playwright.config.ts
 - Create: frontend/e2e/paper-upload.spec.ts
+- Modify: frontend/package.json
+- Modify: frontend/pnpm-lock.yaml
 
 **Interfaces:**
 - Consumes: POST /api/v1/documents, GET /api/v1/documents, GET /api/v1/tasks/{task_id}
@@ -2277,6 +2294,14 @@ export type TaskState = {
 
 api.ts must throw a typed ApiProblem for non-2xx responses and must never expose backend secrets.
 
+Use the direct browser-to-FastAPI approach already implied by
+`NEXT_PUBLIC_API_URL`. Add strict configured CORS for the web origin; do not add
+a Next.js BFF, server actions, database access, MinIO access, or credentials to
+the browser bundle. The API client maps the existing snake_case HTTP schema to
+camelCase frontend types and parses only the documented problem fields. A
+malformed/non-JSON error response becomes a generic status-based `ApiProblem`;
+raw response bodies are never surfaced.
+
 - [ ] **Step 4: Implement upload and progress components**
 
 UploadPanel requirements:
@@ -2288,6 +2313,13 @@ UploadPanel requirements:
 - start TaskProgress after a 202 response.
 
 TaskProgress polls PostgreSQL-backed GET /tasks/{id} every two seconds and stops on READY, FAILED, or CANCELLED. It displays stage, fraction, retry action, and persistent error message. Redis progress caching is not required.
+
+The papers page rehydrates from `GET /documents` on mount, keys progress cards
+by `taskId`, and therefore restores durable progress after browser or service
+restart. A duplicate upload may update the existing card and notice but must
+not append another card. The responsive MVP layout is a semantic Chinese paper
+library: upload/status summary first, document/progress list second; no design
+system, animation framework, or unrelated navigation shell is introduced.
 
 - [ ] **Step 5: Add backend list and task endpoints**
 
@@ -2301,6 +2333,33 @@ POST /api/v1/tasks/{task_id}/retry
 ~~~
 
 Retry is allowed only for FAILED tasks with retryable error codes and creates a new outbox event without resetting durable history.
+
+Use stable descending keyset pagination over `(created_at, id)`. The opaque
+cursor is URL-safe base64 JSON containing only those values; malformed cursors
+return a sanitized `INVALID_CURSOR` problem. `limit` defaults to 50 and is
+bounded to 1..100. List active documents only and return `items` plus
+`next_cursor`; document detail includes the current version and latest task ID.
+
+Task responses include the documented state plus `document_version_id`,
+`retry_count`, and a server-computed `retryable` boolean. The current Task 4-7
+retryable codes are `VALIDATION_FAILED`, `NORMALIZATION_FAILED`,
+`CHUNK_PERSISTENCE_FAILED`, `PARSE_DOWNLOAD_FAILED`, `PARSE_PARSER_FAILED`,
+`PARSE_UPLOAD_FAILED`, `PARSE_PERSISTENCE_FAILED`,
+`PARSE_FAILURE_RECOVERY_FAILED`, and `INGESTION_FAILURE_RECOVERY_FAILED`.
+
+Retry locks the task row, rechecks `FAILED` and the allow-list, increments
+`retry_count`, changes only status to `QUEUED`, retains stage/progress/error
+details until the worker starts, and inserts one
+`document.retry_requested` outbox event in the same transaction. This preserves
+the task identity and durable failure context while making a resumed poll
+possible. Concurrent retry requests yield one accepted retry and one conflict,
+never duplicate dispatch. Missing resources map to 404, invalid cursors to 400,
+and invalid state/permanent failures to 409 problem responses.
+
+Register document and task routers under `/api/v1`. The backend image must copy
+Alembic configuration/migrations, and Compose must run `alembic upgrade head`
+as a one-shot dependency before API/worker startup. Redis remains internal to
+Compose rather than publishing the conflict-prone host port 6379.
 
 - [ ] **Step 6: Run frontend and API contract tests**
 
@@ -2323,6 +2382,12 @@ pnpm --dir frontend exec playwright test e2e/paper-upload.spec.ts
 ~~~
 
 Expected: upload returns a task ID, progress survives a browser refresh, and a deliberately invalid PDF shows a durable failure.
+
+For Task 8, a valid document may legitimately remain `EMBEDDING/RUNNING`
+because Task 9 owns embeddings and the READY transition. The E2E test must not
+wait for READY. Use a file with PDF MIME and `%PDF-` magic but malformed PDF
+content to exercise a worker-produced durable failure; a plain non-PDF remains
+a client-side/400 validation case and does not create durable state.
 
 - [ ] **Step 8: Ingestion UI durability review**
 

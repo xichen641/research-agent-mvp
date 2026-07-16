@@ -4,9 +4,11 @@ services:
       context: ..
       dockerfile: backend/Dockerfile
     env_file: ../.env
+    environment:
+      WEB_ORIGIN: http://localhost:3000
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       minio:
@@ -21,6 +23,7 @@ services:
     command:
       - uv
       - run
+      - --no-dev
       - celery
       - -A
       - research_agent.tasks.celery_app:celery_app
@@ -30,10 +33,23 @@ services:
       - --concurrency=1
     env_file: ../.env
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
+      minio:
+        condition: service_started
+
+  migrate:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    command: ["uv", "run", "--no-dev", "alembic", "upgrade", "head"]
+    env_file: ../.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
 
   web:
     build:
@@ -73,9 +89,6 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
-    ports:
-      - "127.0.0.1:6379:6379"
-
   minio:
     image: minio/minio:latest
     command: server /data --console-address ":9001"

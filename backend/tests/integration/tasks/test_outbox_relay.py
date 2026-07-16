@@ -35,6 +35,7 @@ async def add_event(
     *,
     available_at: datetime | None = None,
     sent_at: datetime | None = None,
+    payload: dict[str, object] | None = None,
 ) -> tuple[UUID, str]:
     event_id = uuid4()
     version_id = str(uuid4())
@@ -42,7 +43,7 @@ async def add_event(
         OutboxEventModel(
             id=event_id,
             event_type="document.uploaded",
-            payload={"version_id": version_id},
+            payload=payload or {"version_id": version_id},
             attempts=0,
             available_at=available_at or datetime.now(UTC),
             sent_at=sent_at,
@@ -78,6 +79,32 @@ async def test_due_event_is_sent_exactly_once_and_not_selected_again(
 
     assert await relay.run_once() == 0
     assert len(sender.calls) == 1
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_nested_payload_cannot_override_fixed_ingestion_routing(
+    db_session: AsyncSession,
+) -> None:
+    version_id = str(uuid4())
+    await add_event(
+        db_session,
+        payload={
+            "task_name": "untrusted.task",
+            "queue": "untrusted_queue",
+            "kwargs": {"version_id": version_id},
+        },
+    )
+    sender = RecordingSender()
+
+    assert await OutboxRelay(SqlOutboxRepository(db_session), sender).run_once() == 1
+    assert sender.calls == [
+        (
+            "research_agent.ingestion.process_document",
+            {"version_id": version_id},
+            "paper_ingestion",
+        )
+    ]
 
 
 @pytest.mark.integration

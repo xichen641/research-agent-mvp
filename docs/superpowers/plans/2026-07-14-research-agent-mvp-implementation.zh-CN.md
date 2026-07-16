@@ -197,7 +197,7 @@ Worker 每次调用都创建并在 `finally` 释放独立 async engine/session�
 
 **目标：** 用户可以上传 PDF、查看论文列表和持久任务进度，刷新或服务重启后仍能恢复状态。
 
-**主要文件：** 前端 `features/papers`、`app/papers/page.tsx`、`lib/api.ts`、后端论文与任务查询路由及 Playwright 测试。
+**主要文件：** 前端 `features/papers`、`app/papers/page.tsx`、`lib/api.ts`、Vitest/Playwright 配置，后端论文与任务查询路由/服务/仓储、CORS 配置、Compose 迁移启动及契约测试。
 
 **输出接口：** `UploadPanel`、`TaskProgress`、论文列表页、列表与任务响应 Schema。
 
@@ -210,6 +210,12 @@ Worker 每次调用都创建并在 `finally` 释放独立 async engine/session�
 - [ ] 步骤 7：执行第一次垂直链路 Smoke Test。
 - [ ] 步骤 8：重启 API/Worker，验证论文和任务状态仍存在。
 - [ ] 步骤 9：准备用户提交检查点。
+
+**编排与契约修正：** 浏览器沿用 `NEXT_PUBLIC_API_URL` 直接调用 FastAPI，并通过严格配置的 Web Origin CORS 访问；不增加 Next.js BFF、Server Action 或浏览器侧秘密。论文列表使用 `(created_at, id)` 降序 keyset 分页，游标为只含这两个值的 URL-safe base64 JSON，`limit` 为 1..100、默认 50。页面从 PostgreSQL 支撑的列表/任务接口恢复卡片，并按 `taskId` 去重。
+
+失败任务重试必须锁定并复查任务行，只允许当前明确的瞬态错误码；在同一事务中增加 `retry_count`、仅把状态改为 `QUEUED`、保留原阶段/进度/错误，并写入唯一的 `document.retry_requested` Outbox 事件。并发重试只能成功一次。缺失资源返回 404，非法游标返回 400，不可重试状态返回 409。
+
+后端镜像需要包含 Alembic 配置与迁移，Compose 在 API/Worker 前运行一次 `alembic upgrade head`，Redis 不再发布容易冲突的主机 6379 端口。Task 8 的有效论文允许停在 `EMBEDDING/RUNNING`，因为 Task 9 才负责 READY；E2E 使用具有 PDF MIME 与 `%PDF-` 头但正文损坏的文件验证 Worker 产生的持久失败，不把普通非 PDF 错误误写成持久任务。
 
 ### 任务 9：建立版本化 Embedding Space 并完成 READY 切换
 

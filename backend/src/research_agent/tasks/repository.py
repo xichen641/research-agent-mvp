@@ -1,11 +1,13 @@
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+from datetime import UTC, datetime
+
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from research_agent.papers.models import DocumentTaskModel
-from research_agent.shared.ids import EntityId
+from research_agent.papers.models import DocumentTaskModel, OutboxEventModel
+from research_agent.shared.ids import EntityId, new_id
 from research_agent.tasks.domain import TaskRecord, TaskStage, TaskStatus
 
 
@@ -16,6 +18,10 @@ class TaskRecordNotFoundError(LookupError):
 class TaskPersistenceError(Exception):
     def __init__(self) -> None:
         super().__init__("task persistence failed")
+
+
+class TaskNotRetryableError(Exception):
+    pass
 
 
 @runtime_checkable
@@ -39,6 +45,12 @@ class TaskRepository(Protocol):
     ) -> None: ...
 
     async def commit(self) -> None: ...
+
+    async def retry_task(
+        self, task_id: EntityId, *, retryable_error_codes: frozenset[str]
+    ) -> TaskRecord | None: ...
+
+    async def rollback(self) -> None: ...
 
 
 class SqlTaskRepository:
@@ -98,6 +110,52 @@ class SqlTaskRepository:
     async def commit(self) -> None:
         try:
             await self._session.commit()
+        except SQLAlchemyError as error:
+            raise TaskPersistenceError() from error
+
+    async def retry_task(
+        self, task_id: EntityId, *, retryable_error_codes: frozenset[str]
+    ) -> TaskRecord | None:
+        try:
+            statement = (
+                select(DocumentTaskModel)
+                .where(DocumentTaskModel.id == task_id)
+                .with_for_update()
+            )
+            model = (await self._session.scalars(statement)).one_or_none()
+            if model is None:
+                return None
+            if (
+                model.status != TaskStatus.FAILED
+                or model.error_code not in retryable_error_codes
+            ):
+                raise TaskNotRetryableError()
+            model.status = TaskStatus.QUEUED
+            model.retry_count += 1
+            self._session.add(
+                OutboxEventModel(
+                    id=new_id(),
+                    event_type="document.retry_requested",
+                    payload={
+                        "task_name": "research_agent.ingestion.process_document",
+                        "queue": "paper_ingestion",
+                        "kwargs": {"version_id": str(model.document_version_id)},
+                    },
+                    attempts=0,
+                    available_at=datetime.now(UTC),
+                    sent_at=None,
+                )
+            )
+            await self._session.commit()
+            return _task_record(model)
+        except TaskNotRetryableError:
+            raise
+        except SQLAlchemyError as error:
+            raise TaskPersistenceError() from error
+
+    async def rollback(self) -> None:
+        try:
+            await self._session.rollback()
         except SQLAlchemyError as error:
             raise TaskPersistenceError() from error
 

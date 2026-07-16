@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     minio_access_key: str = "research"
     minio_secret_key: str = "research-secret"
     minio_bucket: str = "research-agent"
+    web_origin: str = "http://localhost:3000"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

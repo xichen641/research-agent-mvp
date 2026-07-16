@@ -17,6 +17,12 @@ def test_torch_is_locked_from_cpu_index_without_cuda_runtime() -> None:
     assert torch_package["source"]["registry"] == (
         "https://download.pytorch.org/whl/cpu"
     )
+    torchvision_package = next(
+        package for package in packages if package["name"] == "torchvision"
+    )
+    assert torchvision_package["source"]["registry"] == (
+        "https://download.pytorch.org/whl/cpu"
+    )
 
     package_names = {package["name"] for package in packages}
     assert not {

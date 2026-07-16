@@ -5,10 +5,12 @@ import logging
 from typing import cast
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from research_agent.papers.routes import router as papers_router
+from research_agent.config import get_settings
 from research_agent.shared.db import async_session_factory
 from research_agent.shared.errors import AppError
 from research_agent.shared.ids import new_id
@@ -18,6 +20,7 @@ from research_agent.tasks.outbox_relay import (
     OutboxRelay,
     SqlOutboxRepository,
 )
+from research_agent.tasks.routes import router as tasks_router
 
 
 logger = logging.getLogger(__name__)
@@ -60,6 +63,7 @@ def create_app(
     *,
     relay_pass: RelayPass | None = None,
     relay_sleep: RelaySleep = asyncio.sleep,
+    web_origin: str | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -79,6 +83,13 @@ def create_app(
                 await task
 
     app = FastAPI(title="ResearchAgent", lifespan=lifespan)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[web_origin or get_settings().web_origin],
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Content-Type", "X-Trace-ID"],
+    )
 
     @app.middleware("http")
     async def trace_id_middleware(
@@ -94,7 +105,14 @@ def create_app(
 
     @app.exception_handler(AppError)
     async def app_error_handler(request: Request, error: AppError) -> JSONResponse:
-        status = 400 if error.code == "INVALID_PDF" else 503 if error.retryable else 500
+        status_by_code = {
+            "INVALID_PDF": 400,
+            "INVALID_CURSOR": 400,
+            "DOCUMENT_NOT_FOUND": 404,
+            "TASK_NOT_FOUND": 404,
+            "TASK_NOT_RETRYABLE": 409,
+        }
+        status = status_by_code.get(error.code, 503 if error.retryable else 500)
         return JSONResponse(
             status_code=status,
             media_type="application/problem+json",
@@ -115,6 +133,7 @@ def create_app(
         return {"status": "ok"}
 
     app.include_router(papers_router, prefix="/api/v1")
+    app.include_router(tasks_router, prefix="/api/v1")
 
     return app
 

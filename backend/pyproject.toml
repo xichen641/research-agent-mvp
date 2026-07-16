@@ -19,6 +19,7 @@ dependencies = [
     "python-multipart>=0.0.32",
     "sqlalchemy>=2.0.51",
     "torch>=2.13.0",
+    "torchvision>=0.28.0",
     "uvicorn[standard]>=0.51.0",
 ]
 
@@ -29,6 +30,7 @@ explicit = true
 
 [tool.uv.sources]
 torch = [{ index = "pytorch-cpu" }]
+torchvision = [{ index = "pytorch-cpu" }]
 
 [project.scripts]
 research-agent = "research_agent:main"

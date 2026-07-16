@@ -9,6 +9,10 @@ from research_agent.papers.models import OutboxEventModel
 from research_agent.shared.ids import EntityId
 
 
+INGESTION_TASK_NAME = "research_agent.ingestion.process_document"
+INGESTION_QUEUE = "paper_ingestion"
+
+
 @dataclass(frozen=True, slots=True)
 class OutboxEventRecord:
     id: EntityId
@@ -95,13 +99,18 @@ class OutboxRelay:
         sent = 0
         for event in events:
             try:
-                version_id = event.payload["version_id"]
+                kwargs = event.payload.get("kwargs")
+                version_id = (
+                    kwargs.get("version_id")
+                    if isinstance(kwargs, dict)
+                    else event.payload.get("version_id")
+                )
                 if not isinstance(version_id, str):
                     raise TypeError("outbox version_id must be a string")
                 self._celery.send_task(
-                    "research_agent.ingestion.process_document",
+                    INGESTION_TASK_NAME,
                     kwargs={"version_id": version_id},
-                    queue="paper_ingestion",
+                    queue=INGESTION_QUEUE,
                 )
             except Exception:
                 await self._repository.record_failure(event.id)

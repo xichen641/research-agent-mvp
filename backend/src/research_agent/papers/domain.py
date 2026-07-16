@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 
 from research_agent.shared.ids import EntityId, new_id
@@ -74,3 +75,29 @@ class DocumentVersionRecord:
     parsed_markdown_object_key: str | None = None
     image_object_keys: tuple[str, ...] | None = None
     parse_quality: dict[str, object] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentSummaryRecord:
+    id: EntityId
+    title: str
+    status: DocumentStatus
+    current_version_id: EntityId
+    latest_task_id: EntityId
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class SafeDocumentVersionRecord:
+    id: EntityId
+    filename: str
+    status: VersionStatus
+    pipeline_version: str
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentDetailRecord:
+    summary: DocumentSummaryRecord
+    current_version: SafeDocumentVersionRecord
