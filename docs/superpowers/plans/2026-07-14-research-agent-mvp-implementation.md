@@ -1749,10 +1749,17 @@ git commit -m "feat: dispatch durable paper jobs"
 
 **Files:**
 - Modify: backend/pyproject.toml
+- Modify: backend/uv.lock
+- Modify: backend/src/research_agent/papers/domain.py
+- Modify: backend/src/research_agent/papers/models.py
+- Modify: backend/src/research_agent/papers/repository.py
+- Modify: backend/src/research_agent/tasks/repository.py
 - Create: backend/src/research_agent/ingestion/contracts.py
 - Create: backend/src/research_agent/ingestion/docling_parser.py
 - Create: backend/src/research_agent/ingestion/pipeline.py
+- Create: backend/migrations/versions/0002_parse_artifacts.py
 - Create: backend/tests/helpers/pdf_factory.py
+- Create: backend/tests/unit/ingestion/test_dependency_lock.py
 - Create: backend/tests/unit/ingestion/test_pipeline.py
 - Create: backend/tests/integration/ingestion/test_docling_parser.py
 
@@ -1876,6 +1883,7 @@ class ParsedDocument:
     elements: list[ParsedElement]
     images: list[ParsedImage]
     page_count: int
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1884,6 +1892,9 @@ class ParseQualityReport:
     parsed_pages: int
     body_characters: int
     empty_pages: tuple[int, ...]
+    section_count: int
+    table_count: int
+    image_count: int
     warnings: tuple[str, ...]
 ~~~
 
@@ -1905,6 +1916,7 @@ DoclingDocumentParser must configure:
 pipeline_options = PdfPipelineOptions()
 pipeline_options.do_ocr = False
 pipeline_options.do_table_structure = True
+pipeline_options.generate_picture_images = True
 converter = DocumentConverter(
     allowed_formats=[InputFormat.PDF],
     format_options={
@@ -1913,7 +1925,7 @@ converter = DocumentConverter(
 )
 ~~~
 
-Normalize Docling text, table, picture, section path, page number, bounding box, Markdown, and JSON into the contracts above. No Docling class leaves this adapter.
+Normalize Docling text, table, picture, section path, page number, top-left-origin bounding box, Markdown, and lossless JSON into the contracts above. Use Docling `self_ref` values as stable element/image IDs where available; use `page_number=0` as the explicit unknown-provenance sentinel instead of inventing a positive page number, and add a warning to `ParsedDocument.warnings` for every normalized content item that lacks page provenance. No Docling class leaves this adapter. Picture extraction must emit deterministic PNG bytes and content type `image/png`.
 
 - [ ] **Step 6: Implement artifact keys and quality rules**
 
@@ -1926,6 +1938,18 @@ IngestionPipeline.parse must:
 5. Calculate ParseQualityReport.
 6. Persist artifact metadata.
 7. Mark NEEDS_REVIEW when parsed pages are below 95% or body text is below 100 characters per parsed page.
+
+Use the design-specified deterministic keys:
+
+~~~text
+papers/{document_id}/parsed/{version_id}/document.json
+papers/{document_id}/parsed/{version_id}/document.md
+papers/{document_id}/images/{version_id}/{image_id}.png
+~~~
+
+Migration `0002_parse_artifacts` extends `document_version` with nullable `parsed_json_object_key`, `parsed_markdown_object_key`, `image_object_keys` JSONB, and `parse_quality` JSONB columns so pre-existing unparsed rows remain valid. PostgreSQL stores the durable object-key manifest and quality report; MinIO stores the large artifact bytes. Extend the project repository interfaces with the narrow operations required to load a version, persist this manifest plus parser/status metadata, and load the current task by `document_version_id`. Do not expose SQLAlchemy, Docling, MinIO, or Celery types through those interfaces.
+
+All synchronous object-storage and Docling operations run through `asyncio.to_thread`. Close the downloaded MinIO stream, always remove the temporary directory, and use deterministic object keys so a retry overwrites the same artifacts instead of creating duplicates. Persist the manifest only after every artifact upload succeeds. On parser/storage failure, roll back partial database state and durably mark the task, version, and document `FAILED` without leaking credentials or full paper text in the error. When the quality rule triggers, persist document/version `NEEDS_REVIEW` and terminate the current task as non-retryable `FAILED` with error code `PARSE_QUALITY_REVIEW`; otherwise leave the version/document processing state ready for Task 7 to continue and keep the task at `PARSING/RUNNING`.
 
 Use this deterministic rule:
 
@@ -1944,12 +1968,12 @@ uv run pytest tests/unit/ingestion/test_pipeline.py -v
 uv run pytest tests/integration/ingestion/test_docling_parser.py -v -m integration
 ~~~
 
-Expected: normalized unit test passes; generated two-page PDF produces two parsed pages, Markdown containing both page texts, and non-empty provenance.
+Expected: normalized unit tests cover deterministic keys, manifest persistence, quality thresholds, idempotent overwrite, stream/temp cleanup, and durable failure state; generated two-page PDF produces two parsed pages, Markdown containing both page texts, lossless JSON, and non-empty page/bounding-box provenance. The real Docling test must run with OCR disabled and must not require a real provider key.
 
 - [ ] **Step 8: Prepare the user commit checkpoint**
 
 ~~~powershell
-git add backend/pyproject.toml backend/uv.lock backend/src/research_agent/ingestion backend/tests/helpers/pdf_factory.py backend/tests/unit/ingestion backend/tests/integration/ingestion
+git add backend/pyproject.toml backend/uv.lock backend/src/research_agent/ingestion backend/src/research_agent/papers backend/src/research_agent/tasks/repository.py backend/migrations/versions/0002_parse_artifacts.py backend/tests/helpers/pdf_factory.py backend/tests/unit/ingestion backend/tests/integration/ingestion
 git commit -m "feat: parse PDFs into versioned artifacts"
 ~~~
 
@@ -1962,7 +1986,7 @@ git commit -m "feat: parse PDFs into versioned artifacts"
 - Modify: backend/src/research_agent/ingestion/pipeline.py
 - Modify: backend/src/research_agent/ingestion/celery_tasks.py
 - Create: backend/src/research_agent/ingestion/models.py
-- Create: backend/migrations/versions/0002_chunks.py
+- Create: backend/migrations/versions/0003_chunks.py
 - Create: backend/tests/unit/ingestion/test_chunker.py
 - Create: backend/tests/integration/ingestion/test_pipeline_ready.py
 
@@ -2069,7 +2093,7 @@ StructuralChunker must:
 
 - [ ] **Step 4: Add chunk persistence**
 
-Migration 0002 creates:
+Migration 0003 creates:
 
 ~~~sql
 CREATE TABLE document_chunk (
@@ -2131,7 +2155,7 @@ Expected: running the same version twice produces the same chunk count and uniqu
 - [ ] **Step 7: Prepare the user commit checkpoint**
 
 ~~~powershell
-git add backend/src/research_agent/ingestion backend/migrations/versions/0002_chunks.py backend/tests/unit/ingestion backend/tests/integration/ingestion
+git add backend/src/research_agent/ingestion backend/migrations/versions/0003_chunks.py backend/tests/unit/ingestion backend/tests/integration/ingestion
 git commit -m "feat: create structure-aware paper chunks"
 ~~~
 
@@ -2288,7 +2312,7 @@ git commit -m "feat: show paper upload and processing progress"
 - Modify: backend/src/research_agent/config.py
 - Create: backend/src/research_agent/providers/openai_embeddings.py
 - Create: backend/src/research_agent/retrieval/models.py
-- Create: backend/migrations/versions/0003_embeddings.py
+- Create: backend/migrations/versions/0004_embeddings.py
 - Modify: backend/src/research_agent/ingestion/pipeline.py
 - Create: backend/tests/unit/providers/test_openai_embeddings.py
 - Create: backend/tests/integration/ingestion/test_embedding_stage.py
@@ -2384,7 +2408,7 @@ class OpenAICompatibleEmbeddingProvider:
 
 - [ ] **Step 5: Create embedding tables and HNSW index**
 
-Migration 0003:
+Migration 0004:
 
 ~~~sql
 CREATE TABLE embedding_space (
@@ -2446,7 +2470,7 @@ Expected: a valid test PDF progresses from QUEUED to READY, its Markdown and JSO
 - [ ] **Step 9: Prepare the user commit checkpoint**
 
 ~~~powershell
-git add backend/pyproject.toml backend/uv.lock backend/src/research_agent/config.py backend/src/research_agent/providers/openai_embeddings.py backend/src/research_agent/retrieval backend/src/research_agent/ingestion/pipeline.py backend/migrations/versions/0003_embeddings.py backend/tests
+git add backend/pyproject.toml backend/uv.lock backend/src/research_agent/config.py backend/src/research_agent/providers/openai_embeddings.py backend/src/research_agent/retrieval backend/src/research_agent/ingestion/pipeline.py backend/migrations/versions/0004_embeddings.py backend/tests
 git commit -m "feat: embed and activate paper versions"
 ~~~
 
@@ -2751,7 +2775,7 @@ git commit -m "feat: fuse rerank and evaluate retrieval"
 - Create: backend/src/research_agent/chat/repository.py
 - Create: backend/src/research_agent/chat/graph.py
 - Create: backend/src/research_agent/chat/service.py
-- Create: backend/migrations/versions/0004_chat.py
+- Create: backend/migrations/versions/0005_chat.py
 - Create: backend/tests/unit/chat/test_graph.py
 - Create: backend/tests/integration/chat/test_chat_persistence.py
 
@@ -2801,7 +2825,7 @@ Expected: FAIL because chat.domain and chat.graph do not exist.
 
 - [ ] **Step 4: Create chat persistence**
 
-Migration 0004 creates:
+Migration 0005 creates:
 
 ~~~sql
 CREATE TABLE chat_session (
@@ -2895,7 +2919,7 @@ Expected: insufficient evidence routes to clarification; a successful run surviv
 - [ ] **Step 9: Prepare the user commit checkpoint**
 
 ~~~powershell
-git add backend/pyproject.toml backend/uv.lock backend/src/research_agent/chat backend/migrations/versions/0004_chat.py backend/tests/unit/chat backend/tests/integration/chat
+git add backend/pyproject.toml backend/uv.lock backend/src/research_agent/chat backend/migrations/versions/0005_chat.py backend/tests/unit/chat backend/tests/integration/chat
 git commit -m "feat: orchestrate persistent paper chat"
 ~~~
 
@@ -3189,7 +3213,7 @@ git commit -m "feat: stream verified cited paper answers"
 - Create: backend/src/research_agent/notes/service.py
 - Create: backend/src/research_agent/notes/celery_tasks.py
 - Create: backend/src/research_agent/notes/routes.py
-- Create: backend/migrations/versions/0005_notes.py
+- Create: backend/migrations/versions/0006_notes.py
 - Create: backend/tests/unit/notes/test_note_generation.py
 - Create: backend/tests/integration/notes/test_note_revisions.py
 - Create: frontend/src/features/notes/note-editor.tsx
@@ -3245,7 +3269,7 @@ Expected: FAIL because notes.domain and notes.service do not exist.
 
 - [ ] **Step 3: Create note persistence**
 
-Migration 0005:
+Migration 0006:
 
 ~~~sql
 CREATE TABLE paper_note (
@@ -3340,7 +3364,7 @@ Generate notes for three different papers, edit each, restart services, and conf
 - [ ] **Step 9: Prepare the user commit checkpoint**
 
 ~~~powershell
-git add backend/src/research_agent/notes backend/migrations/versions/0005_notes.py backend/tests frontend/src/features/notes frontend/src/app/papers
+git add backend/src/research_agent/notes backend/migrations/versions/0006_notes.py backend/tests frontend/src/features/notes frontend/src/app/papers
 git commit -m "feat: generate optional versioned paper notes"
 ~~~
 
@@ -3354,7 +3378,7 @@ git commit -m "feat: generate optional versioned paper notes"
 - Create: backend/src/research_agent/shared/observability.py
 - Create: backend/src/research_agent/evaluation/answer_eval.py
 - Modify: backend/src/research_agent/evaluation/cli.py
-- Create: backend/migrations/versions/0006_usage_evaluation.py
+- Create: backend/migrations/versions/0007_usage_evaluation.py
 - Create: backend/tests/unit/evaluation/test_answer_metrics.py
 - Create: backend/tests/integration/evaluation/test_run_persistence.py
 - Create: evaluation/README.md
@@ -3401,7 +3425,7 @@ Expected: FAIL because evaluation.answer_eval does not exist.
 
 - [ ] **Step 4: Add durable usage and evaluation schema**
 
-Migration 0006 creates:
+Migration 0007 creates:
 
 ~~~sql
 CREATE TABLE model_usage (
@@ -3493,7 +3517,7 @@ Expected: evaluation run is reproducible from stored configuration; logs contain
 - [ ] **Step 8: Prepare the user commit checkpoint**
 
 ~~~powershell
-git add backend/pyproject.toml backend/uv.lock backend/src/research_agent/shared backend/src/research_agent/evaluation backend/migrations/versions/0006_usage_evaluation.py backend/tests evaluation/README.md evaluation/datasets/synthetic_mvp.jsonl
+git add backend/pyproject.toml backend/uv.lock backend/src/research_agent/shared backend/src/research_agent/evaluation backend/migrations/versions/0007_usage_evaluation.py backend/tests evaluation/README.md evaluation/datasets/synthetic_mvp.jsonl
 git commit -m "feat: trace and evaluate RAG quality"
 ~~~
 

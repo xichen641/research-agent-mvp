@@ -70,3 +70,7 @@ class DocumentVersionRecord:
     parser_version: str
     pipeline_version: str
     status: VersionStatus
+    parsed_json_object_key: str | None = None
+    parsed_markdown_object_key: str | None = None
+    image_object_keys: tuple[str, ...] | None = None
+    parse_quality: dict[str, object] | None = None

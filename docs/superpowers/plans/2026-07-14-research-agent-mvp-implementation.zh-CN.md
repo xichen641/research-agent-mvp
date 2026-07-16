@@ -154,7 +154,7 @@
 
 **目标：** 将 Docling 隔离在解析适配器内，把 PDF 转换为项目自有的标准元素、Markdown、JSON 和质量报告。
 
-**主要文件：** `ingestion/contracts.py`、`ingestion/docling_parser.py`、`ingestion/pipeline.py`、解析契约与集成测试。
+**主要文件：** `backend/pyproject.toml`、`backend/uv.lock`、`papers/domain.py`、`papers/models.py`、`papers/repository.py`、`tasks/repository.py`、`ingestion/contracts.py`、`ingestion/docling_parser.py`、`ingestion/pipeline.py`、`migrations/versions/0002_parse_artifacts.py`、`tests/unit/ingestion/test_dependency_lock.py`，以及解析、仓储与迁移测试。
 
 **输出接口：** `ParsedElement`、`ParsedDocument`、`ParseQualityReport`、`DocumentParser`、`DoclingDocumentParser`、`IngestionPipeline.parse`。
 
@@ -167,13 +167,17 @@
 - [ ] 步骤 7：运行单元测试和一个真实 Docling 集成测试。
 - [ ] 步骤 8：准备用户提交检查点。
 
+**持久化与失败语义修正：** 新增 `0002_parse_artifacts` 迁移，在 `document_version` 保存可空的 JSON/Markdown 对象 key、图片 key 清单和解析质量 JSON；既有未解析行保持有效。对象 key 固定为 `papers/{document_id}/parsed/{version_id}/document.{json,md}` 与 `papers/{document_id}/images/{version_id}/{image_id}.png`。扩展论文/任务仓储的窄接口，以按版本读取论文版本、持久化 manifest/解析器/状态，以及按 `document_version_id` 获取当前任务；领域接口不得暴露 SQLAlchemy、Docling、MinIO 或 Celery 类型。同步 MinIO/Docling 调用全部通过 `asyncio.to_thread`；关闭下载流并清理临时目录；所有对象上传成功后才提交 manifest。解析/存储异常必须回滚并将任务、版本、论文持久标记为 `FAILED`；低于质量阈值时论文/版本设为 `NEEDS_REVIEW`，当前任务以不可重试 `PARSE_QUALITY_REVIEW` 失败结束；正常解析保持 `PARSING/RUNNING`，供 Task 7 继续。质量报告同时保存章节、表格和图片数量；Docling 图片使用稳定 ID 导出确定性 PNG；缺失页级 provenance 的元素使用 `page_number=0` 明确表示未知，并记录 warning，不能伪造正页码。
+
+**迁移顺延：** 因 Task 6 新增 `0002_parse_artifacts`，后续迁移依次改为 `0003_chunks.py`、`0004_embeddings.py`、`0005_chat.py`、`0006_notes.py`、`0007_usage_evaluation.py`，避免形成多个 Alembic head。
+
 **关键约束：** MVP 不做 OCR；扫描件和低质量解析进入 `NEEDS_REVIEW` 或 `FAILED`，不能伪装成成功。
 
 ### 任务 7：实现结构感知切片并串联入库流程
 
 **目标：** 按章节、段落、表格和页面信息切片，保证可检索性与引用可追溯性。
 
-**主要文件：** `ingestion/chunker.py`、`ingestion/pipeline.py`、`migrations/versions/0002_chunks.py` 及切片测试。
+**主要文件：** `ingestion/chunker.py`、`ingestion/pipeline.py`、`migrations/versions/0003_chunks.py` 及切片测试。
 
 **输出接口：** `ChunkingConfig`、`ChunkDraft`、`StructuralChunker.chunk`、`document_chunk`、`process_document(version_id)`。
 
@@ -207,7 +211,7 @@
 
 **目标：** 对切片分批向量化，记录模型和维度，只有全部索引成功后才原子切换当前版本为 `READY`。
 
-**主要文件：** `providers/openai_embeddings.py`、`retrieval/models.py`、`ingestion/pipeline.py`、`migrations/versions/0003_embeddings.py` 及测试。
+**主要文件：** `providers/openai_embeddings.py`、`retrieval/models.py`、`ingestion/pipeline.py`、`migrations/versions/0004_embeddings.py` 及测试。
 
 **输出接口：** `EmbeddingSpace`、`ChunkEmbeddingModel`、`OpenAICompatibleEmbeddingProvider`、`IngestionPipeline.embed_and_activate`。
 

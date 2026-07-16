@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from sqlalchemy import Select, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from research_agent.papers.domain import (
@@ -60,7 +60,25 @@ class PaperRepository(Protocol):
         status: DocumentStatus,
     ) -> None: ...
 
+    async def persist_parse_artifacts(
+        self,
+        version_id: EntityId,
+        *,
+        parser_name: str,
+        parser_version: str,
+        json_object_key: str,
+        markdown_object_key: str,
+        image_object_keys: tuple[str, ...],
+        parse_quality: dict[str, object],
+        version_status: VersionStatus,
+        document_status: DocumentStatus,
+    ) -> None: ...
+
+    async def mark_parse_failed(self, version_id: EntityId) -> None: ...
+
     async def commit(self) -> None: ...
+
+    async def rollback(self) -> None: ...
 
 
 @runtime_checkable
@@ -241,7 +259,10 @@ class SqlPaperRepository:
     async def get_version(
         self, version_id: EntityId
     ) -> DocumentVersionRecord | None:
-        model = await self._session.get(DocumentVersionModel, version_id)
+        try:
+            model = await self._session.get(DocumentVersionModel, version_id)
+        except SQLAlchemyError as error:
+            raise PaperPersistenceError() from error
         if model is None:
             return None
         return DocumentVersionRecord(
@@ -253,10 +274,21 @@ class SqlPaperRepository:
             parser_version=model.parser_version,
             pipeline_version=model.pipeline_version,
             status=VersionStatus(model.status),
+            parsed_json_object_key=model.parsed_json_object_key,
+            parsed_markdown_object_key=model.parsed_markdown_object_key,
+            image_object_keys=(
+                tuple(model.image_object_keys)
+                if model.image_object_keys is not None
+                else None
+            ),
+            parse_quality=model.parse_quality,
         )
 
     async def get_task(self, task_id: EntityId) -> TaskRecord | None:
-        model = await self._session.get(DocumentTaskModel, task_id)
+        try:
+            model = await self._session.get(DocumentTaskModel, task_id)
+        except SQLAlchemyError as error:
+            raise PaperPersistenceError() from error
         if model is None:
             return None
         return _task_record(model)
@@ -278,14 +310,67 @@ class SqlPaperRepository:
         document.current_version_id = version_id
         document.status = status
 
+    async def persist_parse_artifacts(
+        self,
+        version_id: EntityId,
+        *,
+        parser_name: str,
+        parser_version: str,
+        json_object_key: str,
+        markdown_object_key: str,
+        image_object_keys: tuple[str, ...],
+        parse_quality: dict[str, object],
+        version_status: VersionStatus,
+        document_status: DocumentStatus,
+    ) -> None:
+        try:
+            version = await self._session.get(DocumentVersionModel, version_id)
+            if version is None:
+                raise PaperRecordNotFoundError("document version does not exist")
+            document = await self._session.get(DocumentModel, version.document_id)
+            if document is None:
+                raise PaperRecordNotFoundError("document does not exist")
+            # The manifest and both statuses share one transaction boundary.
+            # 清单和两个状态共享同一个事务边界。
+            version.parser_name = parser_name
+            version.parser_version = parser_version
+            version.parsed_json_object_key = json_object_key
+            version.parsed_markdown_object_key = markdown_object_key
+            version.image_object_keys = list(image_object_keys)
+            version.parse_quality = parse_quality
+            version.status = version_status
+            document.status = document_status
+        except PaperRecordNotFoundError:
+            raise
+        except SQLAlchemyError as error:
+            raise PaperPersistenceError() from error
+
+    async def mark_parse_failed(self, version_id: EntityId) -> None:
+        try:
+            version = await self._session.get(DocumentVersionModel, version_id)
+            if version is None:
+                raise PaperRecordNotFoundError("document version does not exist")
+            document = await self._session.get(DocumentModel, version.document_id)
+            if document is None:
+                raise PaperRecordNotFoundError("document does not exist")
+            version.status = VersionStatus.FAILED
+            document.status = DocumentStatus.FAILED
+        except PaperRecordNotFoundError:
+            raise
+        except SQLAlchemyError as error:
+            raise PaperPersistenceError() from error
+
     async def commit(self) -> None:
         try:
             await self._session.commit()
-        except IntegrityError:
+        except SQLAlchemyError:
             raise PaperPersistenceError() from None
 
     async def rollback(self) -> None:
-        await self._session.rollback()
+        try:
+            await self._session.rollback()
+        except SQLAlchemyError:
+            raise PaperPersistenceError() from None
 
     @staticmethod
     def _document_query() -> Select[tuple[DocumentModel, EntityId]]:

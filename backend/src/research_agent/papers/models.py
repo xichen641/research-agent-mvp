@@ -54,6 +54,12 @@ class DocumentVersionModel(Base):
     parser_version: Mapped[str] = mapped_column(String(128))
     pipeline_version: Mapped[str] = mapped_column(String(128))
     status: Mapped[str] = mapped_column(String(32))
+    parsed_json_object_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    parsed_markdown_object_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    image_object_keys: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+    parse_quality: Mapped[dict[str, object] | None] = mapped_column(
+        JSONB, nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
