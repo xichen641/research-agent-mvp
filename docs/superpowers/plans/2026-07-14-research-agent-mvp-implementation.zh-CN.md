@@ -177,7 +177,7 @@
 
 **目标：** 按章节、段落、表格和页面信息切片，保证可检索性与引用可追溯性。
 
-**主要文件：** `ingestion/chunker.py`、`ingestion/pipeline.py`、`migrations/versions/0003_chunks.py` 及切片测试。
+**主要文件：** `ingestion/chunker.py`、`ingestion/models.py`、`ingestion/pipeline.py`、`ingestion/celery_tasks.py`、`papers/repository.py`、`shared/errors.py`、`migrations/env.py`、`migrations/versions/0003_chunks.py`，以及切片、编排和 Celery 测试。
 
 **输出接口：** `ChunkingConfig`、`ChunkDraft`、`StructuralChunker.chunk`、`document_chunk`、`process_document(version_id)`。
 
@@ -188,6 +188,10 @@
 - [ ] 步骤 5：串联 `VALIDATING → PARSING → NORMALIZING → CHUNKING → EMBEDDING`。
 - [ ] 步骤 6：重复执行同一版本，验证不会生成重复切片。
 - [ ] 步骤 7：准备用户提交检查点。
+
+**编排与持久化修正：** 切片配置必须满足目标 token 为正、重叠非负且小于目标值；空白元素忽略，单个超大表格或元素保持原子性。参考文献块优先标记为 `reference`，纯表格为 `table`，纯图片说明为 `figure`，其余为 `text`。中文检索文本在应用侧分词，纯英文保持原文。`DocumentChunkModel` 必须注册到 Alembic metadata；切片按版本、序号和流水线版本幂等 upsert，重试保留既有行 ID，并删除同版本的过期序号。
+
+Worker 每次调用都创建并在 `finally` 释放独立 async engine/session，不能跨多个 `asyncio.run` 复用 API 全局 engine。可重试项目错误映射为 `TransientInfrastructureError`，无效 UUID 和不可重试错误不自动重试。流水线持久经过 `VALIDATING → PARSING → NORMALIZING → CHUNKING → EMBEDDING`，进度为 1 到 5；Task 7 完成后论文/版本仍为 `PROCESSING`，任务停在 `EMBEDDING/RUNNING`，只有 Task 9 能设为 `READY` 并切换当前版本。`NEEDS_REVIEW` 不生成切片；切片失败必须回滚并在正确阶段持久标记论文、版本和任务失败。已到 `EMBEDDING` 或更后阶段的重复执行在 Task 9 接入前直接幂等返回。
 
 ### 任务 8：实现论文库、上传和持久进度界面
 

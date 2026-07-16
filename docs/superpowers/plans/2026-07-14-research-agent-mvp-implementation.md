@@ -1986,9 +1986,13 @@ git commit -m "feat: parse PDFs into versioned artifacts"
 - Modify: backend/src/research_agent/ingestion/pipeline.py
 - Modify: backend/src/research_agent/ingestion/celery_tasks.py
 - Create: backend/src/research_agent/ingestion/models.py
+- Modify: backend/src/research_agent/papers/repository.py
+- Modify: backend/src/research_agent/shared/errors.py
+- Modify: backend/migrations/env.py
 - Create: backend/migrations/versions/0003_chunks.py
 - Create: backend/tests/unit/ingestion/test_chunker.py
 - Create: backend/tests/integration/ingestion/test_pipeline_ready.py
+- Modify: backend/tests/unit/tasks/test_celery_config.py
 
 **Interfaces:**
 - Consumes: ParsedElement, ParsedDocument, PaperRepository, TaskRepository
@@ -2091,6 +2095,14 @@ StructuralChunker must:
 - keep tables and figure captions with their section path;
 - mark bibliography chunks as content_type reference.
 
+Validate `target_tokens > 0`, `overlap_tokens >= 0`, and
+`overlap_tokens < target_tokens`. Whitespace-only elements are ignored. A
+single oversized table or element remains atomic. `reference` overrides the
+other content types; otherwise table-only chunks use `table`, picture-only
+chunks use `figure`, and mixed/ordinary chunks use `text`. Bibliography labels
+are matched case-insensitively for `References`/`Bibliography` and explicitly
+for `参考文献`.
+
 - [ ] **Step 4: Add chunk persistence**
 
 Migration 0003 creates:
@@ -2123,6 +2135,14 @@ CREATE INDEX ix_chunk_search_zh ON document_chunk USING gin (search_vector_zh);
 
 Use application-side Chinese tokenization to populate lexical_text; English text remains unchanged.
 
+`DocumentChunkModel` must be imported by `migrations/env.py` so Alembic
+autogenerate and schema-drift checks see the table. Chunk persistence uses one
+transactional PostgreSQL upsert keyed by
+`(document_version_id, chunk_index, pipeline_version)`, preserves existing row
+IDs on retries, and deletes stale indexes for the same version/pipeline. The
+repository translates SQLAlchemy failures into the existing sanitized project
+error boundary.
+
 - [ ] **Step 5: Complete process_document orchestration**
 
 The Celery entry point must only open dependencies and call the application pipeline:
@@ -2137,10 +2157,27 @@ The Celery entry point must only open dependencies and call the application pipe
     max_retries=5,
 )
 def process_document(self, version_id: str) -> None:
-    run_async(build_ingestion_pipeline().run(UUID(version_id)))
+    run_async(run_ingestion_job(UUID(version_id)))
 ~~~
 
 Pipeline.run transitions through VALIDATING, PARSING, NORMALIZING, CHUNKING, then stops at EMBEDDING until Task 9 supplies the embedding stage.
+
+`run_ingestion_job` creates a fresh async engine and shared session for each
+Celery invocation, builds the parser/storage/paper/task/chunk dependencies on
+that session, and disposes the engine in `finally`; it must not reuse the API's
+global async engine across repeated `asyncio.run` loops. Retryable project
+errors are mapped to `TransientInfrastructureError`; invalid UUIDs and
+non-retryable quality/application errors are not autoretried.
+
+The durable stage sequence uses `RUNNING` with progress values 1 through 5 for
+`VALIDATING`, `PARSING`, `NORMALIZING`, `CHUNKING`, and `EMBEDDING`. After
+chunk persistence, document/version remain `PROCESSING` and the task remains
+`EMBEDDING/RUNNING`; only Task 9 may set `READY` and switch
+`document.current_version_id`. A `NEEDS_REVIEW` parse stops before chunking.
+Chunking/persistence failures roll back partial writes and durably mark the
+document, version, and task `FAILED` at the correct stage with sanitized error
+codes/messages. Re-entering a version already at `EMBEDDING` or later is a
+no-op until Task 9 exists.
 
 - [ ] **Step 6: Verify retries do not duplicate chunks**
 
@@ -2150,7 +2187,9 @@ uv run alembic upgrade head
 uv run pytest tests/unit/ingestion/test_chunker.py tests/integration/ingestion/test_pipeline_ready.py -v
 ~~~
 
-Expected: running the same version twice produces the same chunk count and unique chunk indexes, without duplicate rows.
+Expected: running the same version twice produces the same chunk count, row
+IDs, and unique chunk indexes without duplicate rows; the task ends at
+`EMBEDDING/RUNNING`, not `READY`.
 
 - [ ] **Step 7: Prepare the user commit checkpoint**
 

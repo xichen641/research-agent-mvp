@@ -1,7 +1,8 @@
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from sqlalchemy import Select, select
+from sqlalchemy import Select, delete, select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,6 +22,8 @@ from research_agent.papers.models import (
     DocumentVersionModel,
     OutboxEventModel,
 )
+from research_agent.ingestion.chunker import lexical_text
+from research_agent.ingestion.models import ChunkDraft, DocumentChunkModel
 from research_agent.shared.ids import EntityId, new_id
 from research_agent.tasks.domain import TaskRecord, TaskStage, TaskStatus
 
@@ -75,6 +78,13 @@ class PaperRepository(Protocol):
     ) -> None: ...
 
     async def mark_parse_failed(self, version_id: EntityId) -> None: ...
+
+    async def replace_chunks(
+        self,
+        version_id: EntityId,
+        pipeline_version: str,
+        chunks: list[ChunkDraft],
+    ) -> None: ...
 
     async def commit(self) -> None: ...
 
@@ -359,6 +369,71 @@ class SqlPaperRepository:
             raise
         except SQLAlchemyError as error:
             raise PaperPersistenceError() from error
+
+    async def replace_chunks(
+        self,
+        version_id: EntityId,
+        pipeline_version: str,
+        chunks: list[ChunkDraft],
+    ) -> None:
+        if [chunk.chunk_index for chunk in chunks] != list(range(len(chunks))):
+            raise ValueError("chunk indexes must be contiguous and zero-based")
+
+        try:
+            if chunks:
+                values = [
+                    {
+                        "id": new_id(),
+                        "document_version_id": version_id,
+                        "chunk_index": chunk.chunk_index,
+                        "section_path": list(chunk.section_path),
+                        "content": chunk.content,
+                        "lexical_text": lexical_text(chunk.content),
+                        "content_type": chunk.content_type,
+                        "page_start": chunk.page_start,
+                        "page_end": chunk.page_end,
+                        "element_ids": list(chunk.element_ids),
+                        "token_count": chunk.token_count,
+                        "pipeline_version": pipeline_version,
+                    }
+                    for chunk in chunks
+                ]
+                statement = insert(DocumentChunkModel).values(values)
+                # The conflict update deliberately excludes the primary key so
+                # infrastructure retries preserve stable chunk row identities.
+                # 冲突更新刻意排除主键，以便基础设施重试时保留稳定的切片行标识。
+                await self._session.execute(
+                    statement.on_conflict_do_update(
+                        constraint="uq_chunk_version_index_pipeline",
+                        set_={
+                            "section_path": statement.excluded.section_path,
+                            "content": statement.excluded.content,
+                            "lexical_text": statement.excluded.lexical_text,
+                            "content_type": statement.excluded.content_type,
+                            "page_start": statement.excluded.page_start,
+                            "page_end": statement.excluded.page_end,
+                            "element_ids": statement.excluded.element_ids,
+                            "token_count": statement.excluded.token_count,
+                        },
+                    )
+                )
+
+            stale = delete(DocumentChunkModel).where(
+                DocumentChunkModel.document_version_id == version_id,
+                DocumentChunkModel.pipeline_version == pipeline_version,
+            )
+            if chunks:
+                stale = stale.where(
+                    DocumentChunkModel.chunk_index.not_in(
+                        [chunk.chunk_index for chunk in chunks]
+                    )
+                )
+            # Upsert and stale deletion share the caller's transaction so a
+            # failed replacement leaves the previously committed set intact.
+            # Upsert 与过期删除共用调用方事务，因此替换失败不会破坏已提交的旧集合。
+            await self._session.execute(stale)
+        except SQLAlchemyError:
+            raise PaperPersistenceError() from None
 
     async def commit(self) -> None:
         try:

@@ -11,3 +11,7 @@ class AppError(Exception):
 
     def __str__(self) -> str:
         return self.message
+
+
+class TransientInfrastructureError(Exception):
+    """Signal that Celery may safely retry an infrastructure interruption."""

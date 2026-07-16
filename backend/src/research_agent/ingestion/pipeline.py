@@ -7,14 +7,16 @@ from pathlib import Path
 import re
 import shutil
 from tempfile import TemporaryDirectory
-from typing import Protocol
+from typing import Protocol, cast
 
+from research_agent.ingestion.chunker import StructuralChunker
 from research_agent.ingestion.contracts import (
     DocumentParser,
     ParsedDocument,
     ParseQualityReport,
     ParseResult,
 )
+from research_agent.ingestion.models import ChunkDraft
 from research_agent.papers.domain import (
     DocumentStatus,
     DocumentVersionRecord,
@@ -70,6 +72,15 @@ class ParseTaskRepository(Protocol):
     ) -> None: ...
 
 
+class ChunkPaperRepository(Protocol):
+    async def replace_chunks(
+        self,
+        version_id: EntityId,
+        pipeline_version: str,
+        chunks: list[ChunkDraft],
+    ) -> None: ...
+
+
 class IngestionPipeline:
     def __init__(
         self,
@@ -77,13 +88,93 @@ class IngestionPipeline:
         storage: ObjectStorage,
         papers: ParsePaperRepository,
         tasks: ParseTaskRepository,
+        chunker: StructuralChunker | None = None,
     ) -> None:
         self._parser = parser
         self._storage = storage
         self._papers = papers
         self._tasks = tasks
+        self._chunker = chunker or StructuralChunker()
 
     async def parse(self, version_id: EntityId) -> ParseResult:
+        version, task = await self._load_state(version_id)
+        result, _parsed = await self._parse_loaded(version, task)
+        return result
+
+    async def run(self, version_id: EntityId) -> None:
+        version, task = await self._load_state(version_id)
+        if _stage_at_or_after(task.stage, TaskStage.EMBEDDING):
+            return
+
+        try:
+            await self._update_running(task, TaskStage.VALIDATING, 1)
+            await self._papers.commit()
+        except Exception as error:
+            application_error = AppError(
+                "VALIDATION_FAILED",
+                "Document could not be validated",
+                retryable=True,
+            )
+            await self._persist_ingestion_failure(
+                version_id, task.id, TaskStage.VALIDATING, 1, application_error
+            )
+            raise application_error from error
+
+        result, parsed = await self._parse_loaded(version, task)
+        if result.needs_review:
+            return
+
+        try:
+            await self._update_running(task, TaskStage.NORMALIZING, 3)
+            await self._papers.commit()
+        except Exception as error:
+            application_error = AppError(
+                "NORMALIZATION_FAILED",
+                "Document could not be normalized",
+                retryable=True,
+            )
+            await self._persist_ingestion_failure(
+                version_id, task.id, TaskStage.NORMALIZING, 3, application_error
+            )
+            raise application_error from error
+
+        try:
+            await self._update_running(task, TaskStage.CHUNKING, 4)
+            await self._papers.commit()
+            chunks = await asyncio.to_thread(self._chunker.chunk, parsed.elements)
+        except Exception as error:
+            application_error = AppError(
+                "CHUNKING_FAILED",
+                "Document chunks could not be created",
+            )
+            await self._persist_ingestion_failure(
+                version_id, task.id, TaskStage.CHUNKING, 4, application_error
+            )
+            raise application_error from error
+
+        try:
+            await cast(ChunkPaperRepository, self._papers).replace_chunks(
+                version_id, version.pipeline_version, chunks
+            )
+            await self._update_running(task, TaskStage.EMBEDDING, 5)
+            # Chunk rows and the EMBEDDING handoff commit atomically so workers
+            # never expose a task stage that has no corresponding chunk set.
+            # 切片行与 EMBEDDING 交接原子提交，避免 worker 暴露没有对应切片集的任务阶段。
+            await self._papers.commit()
+        except Exception as error:
+            application_error = AppError(
+                "CHUNK_PERSISTENCE_FAILED",
+                "Document chunks could not be persisted",
+                retryable=True,
+            )
+            await self._persist_ingestion_failure(
+                version_id, task.id, TaskStage.CHUNKING, 4, application_error
+            )
+            raise application_error from error
+
+    async def _load_state(
+        self, version_id: EntityId
+    ) -> tuple[DocumentVersionRecord, TaskRecord]:
         try:
             version = await self._papers.get_version(version_id)
             task = await self._tasks.get_task_for_version(version_id)
@@ -99,7 +190,14 @@ class IngestionPipeline:
                 "PARSE_RECORD_NOT_FOUND",
                 "Document version or parse task does not exist",
             )
+        return version, task
 
+    async def _parse_loaded(
+        self,
+        version: DocumentVersionRecord,
+        task: TaskRecord,
+    ) -> tuple[ParseResult, ParsedDocument]:
+        version_id = version.id
         failure_code = "PARSE_PERSISTENCE_FAILED"
         failure_message = "Parse state could not be persisted"
         try:
@@ -202,8 +300,11 @@ class IngestionPipeline:
                     error_message="Parsed document requires quality review",
                 )
             await self._papers.commit()
-            return ParseResult(
-                report, json_key, markdown_key, image_keys, needs_review
+            return (
+                ParseResult(
+                    report, json_key, markdown_key, image_keys, needs_review
+                ),
+                parsed,
             )
         except Exception as error:
             application_error = (
@@ -215,6 +316,51 @@ class IngestionPipeline:
                 version_id, task.id, application_error
             )
             raise application_error from error
+
+    async def _update_running(
+        self, task: TaskRecord, stage: TaskStage, progress: int
+    ) -> None:
+        await self._tasks.update_task(
+            task.id,
+            stage=stage,
+            status=TaskStatus.RUNNING,
+            progress_current=progress,
+            progress_total=len(TaskStage),
+            error_code=None,
+            error_message=None,
+        )
+
+    async def _persist_ingestion_failure(
+        self,
+        version_id: EntityId,
+        task_id: EntityId,
+        stage: TaskStage,
+        progress: int,
+        application_error: AppError,
+    ) -> None:
+        try:
+            # Recovery starts only after partial work is rolled back, then writes
+            # the sanitized terminal state in a fresh transaction.
+            # 恢复会先回滚部分工作，再在新事务中写入脱敏的终止状态。
+            await self._papers.rollback()
+            await self._papers.mark_parse_failed(version_id)
+            await self._tasks.update_task(
+                task_id,
+                stage=stage,
+                status=TaskStatus.FAILED,
+                progress_current=progress,
+                progress_total=len(TaskStage),
+                error_code=application_error.code,
+                error_message=application_error.message,
+            )
+            await self._papers.commit()
+        except Exception as recovery_error:
+            await self._best_effort_rollback()
+            raise AppError(
+                "INGESTION_FAILURE_RECOVERY_FAILED",
+                "Ingestion failure state could not be persisted",
+                retryable=True,
+            ) from recovery_error
 
     async def _persist_failure_state(
         self,
@@ -323,3 +469,8 @@ def _safe_path_segment(value: str) -> str:
     # 空值或纯点名称不是安全路径段；源 ID 派生名称可在重试间保持稳定并区分原始 ID。
     digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
     return f"image-{digest}"
+
+
+def _stage_at_or_after(current: TaskStage, boundary: TaskStage) -> bool:
+    stages = list(TaskStage)
+    return stages.index(current) >= stages.index(boundary)
