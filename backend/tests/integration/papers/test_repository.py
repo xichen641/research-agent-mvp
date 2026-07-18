@@ -176,7 +176,7 @@ async def test_parse_artifact_migration_upgrade_downgrade_and_single_head(
             )
         assert expected_columns <= upgraded_columns
         assert ScriptDirectory.from_config(config).get_heads() == [
-            "0004_embeddings"
+            "0005_chat"
         ]
 
         await asyncio.to_thread(command.downgrade, config, "0001_papers_tasks")

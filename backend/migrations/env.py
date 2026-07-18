@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import MutableMapping
 from logging.config import fileConfig
+from typing import Literal
 
 from alembic import context
 from sqlalchemy import Connection, pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+from research_agent.chat import models as chat_models  # noqa: F401
 from research_agent.config import get_settings
 from research_agent.ingestion import models as ingestion_models  # noqa: F401
 from research_agent.papers import models as paper_models  # noqa: F401
@@ -20,6 +23,35 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 target_metadata = Base.metadata
+LANGGRAPH_CHECKPOINT_TABLES = frozenset(
+    {
+        "checkpoint_migrations",
+        "checkpoints",
+        "checkpoint_blobs",
+        "checkpoint_writes",
+    }
+)
+
+
+def include_name(
+    name: str | None,
+    type_: Literal[
+        "schema",
+        "table",
+        "column",
+        "index",
+        "unique_constraint",
+        "foreign_key_constraint",
+    ],
+    parent_names: MutableMapping[
+        Literal["schema_name", "table_name", "schema_qualified_table_name"],
+        str | None,
+    ],
+) -> bool:
+    del parent_names
+    # LangGraph owns these tables and migrates them through saver.setup().
+    # LangGraph 通过 saver.setup() 自行管理这些表及其迁移。
+    return not (type_ == "table" and name in LANGGRAPH_CHECKPOINT_TABLES)
 
 
 def _database_url() -> str:
@@ -34,6 +66,7 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
+        include_name=include_name,
     )
 
     with context.begin_transaction():
@@ -45,6 +78,7 @@ def do_run_migrations(connection: Connection) -> None:
         connection=connection,
         target_metadata=target_metadata,
         compare_type=True,
+        include_name=include_name,
     )
 
     with context.begin_transaction():
