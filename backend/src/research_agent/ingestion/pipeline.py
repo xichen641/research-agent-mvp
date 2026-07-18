@@ -23,6 +23,8 @@ from research_agent.papers.domain import (
     VersionStatus,
 )
 from research_agent.papers.storage import ObjectStorage
+from research_agent.providers.protocols import EmbeddingProvider
+from research_agent.retrieval.repository import SqlEmbeddingRepository
 from research_agent.shared.errors import AppError
 from research_agent.shared.ids import EntityId
 from research_agent.tasks.domain import TaskRecord, TaskStage, TaskStatus
@@ -89,12 +91,25 @@ class IngestionPipeline:
         papers: ParsePaperRepository,
         tasks: ParseTaskRepository,
         chunker: StructuralChunker | None = None,
+        *,
+        embedding_provider: EmbeddingProvider | None = None,
+        embedding_repository: SqlEmbeddingRepository | None = None,
+        embedding_batch_size: int = 32,
     ) -> None:
+        if embedding_batch_size <= 0:
+            raise ValueError("embedding_batch_size must be positive")
+        if (embedding_provider is None) != (embedding_repository is None):
+            raise ValueError(
+                "embedding provider and repository must be configured together"
+            )
         self._parser = parser
         self._storage = storage
         self._papers = papers
         self._tasks = tasks
         self._chunker = chunker or StructuralChunker()
+        self._embedding_provider = embedding_provider
+        self._embedding_repository = embedding_repository
+        self._embedding_batch_size = embedding_batch_size
 
     async def parse(self, version_id: EntityId) -> ParseResult:
         version, task = await self._load_state(version_id)
@@ -104,6 +119,8 @@ class IngestionPipeline:
     async def run(self, version_id: EntityId) -> None:
         version, task = await self._load_state(version_id)
         if _stage_at_or_after(task.stage, TaskStage.EMBEDDING):
+            if self._embedding_provider is not None:
+                await self.embed_and_activate(version_id)
             return
 
         try:
@@ -159,7 +176,7 @@ class IngestionPipeline:
             await self._update_running(task, TaskStage.EMBEDDING, 5)
             # Chunk rows and the EMBEDDING handoff commit atomically so workers
             # never expose a task stage that has no corresponding chunk set.
-            # 切片行与 EMBEDDING 交接原子提交，避免 worker 暴露没有对应切片集的任务阶段。
+            # 切片行与 EMBEDDING 交接原子提交，避免 worker 暴露无对应切片集的任务阶段。
             await self._papers.commit()
         except Exception as error:
             application_error = AppError(
@@ -169,6 +186,127 @@ class IngestionPipeline:
             )
             await self._persist_ingestion_failure(
                 version_id, task.id, TaskStage.CHUNKING, 4, application_error
+            )
+            raise application_error from error
+
+        if self._embedding_provider is not None:
+            await self.embed_and_activate(version_id)
+
+    async def embed_and_activate(self, version_id: EntityId) -> None:
+        provider = self._embedding_provider
+        embeddings = self._embedding_repository
+        if provider is None or embeddings is None:
+            raise AppError(
+                "EMBEDDING_NOT_CONFIGURED",
+                "Embedding processing is not configured",
+            )
+
+        version, task = await self._load_state(version_id)
+        if task.status is TaskStatus.READY and version.status is VersionStatus.READY:
+            await embeddings.commit()
+            return
+
+        try:
+            await self._tasks.update_task(
+                task.id,
+                stage=TaskStage.EMBEDDING,
+                status=TaskStatus.RUNNING,
+                progress_current=5,
+                progress_total=len(TaskStage),
+                error_code=None,
+                error_message=None,
+            )
+            space = await embeddings.get_or_create_space(
+                model_id=provider.model_id,
+                dimension=provider.dimension,
+                pipeline_version=version.pipeline_version,
+            )
+            await embeddings.commit()
+        except Exception as error:
+            application_error = AppError(
+                "EMBEDDING_PERSISTENCE_FAILED",
+                "Embedding state could not be persisted",
+                retryable=True,
+            )
+            await self._persist_ingestion_failure(
+                version_id, task.id, TaskStage.EMBEDDING, 5, application_error
+            )
+            raise application_error from error
+
+        while True:
+            try:
+                pending = await embeddings.list_pending_chunks(
+                    version_id=version_id,
+                    pipeline_version=version.pipeline_version,
+                    embedding_space_id=space.id,
+                    limit=self._embedding_batch_size,
+                )
+                # End the read transaction before the provider network call.
+                # 在调用外部 provider 前结束读取事务，避免长事务占用连接与锁。
+                await embeddings.commit()
+            except Exception as error:
+                application_error = AppError(
+                    "EMBEDDING_PERSISTENCE_FAILED",
+                    "Embedding state could not be loaded",
+                    retryable=True,
+                )
+                await self._persist_ingestion_failure(
+                    version_id, task.id, TaskStage.EMBEDDING, 5, application_error
+                )
+                raise application_error from error
+
+            if not pending:
+                break
+
+            try:
+                vectors = await provider.embed_documents(
+                    [chunk.content for chunk in pending]
+                )
+            except Exception as error:
+                application_error = AppError(
+                    "EMBEDDING_PROVIDER_FAILED",
+                    "Embedding provider could not process document chunks",
+                    retryable=True,
+                )
+                await self._persist_ingestion_failure(
+                    version_id, task.id, TaskStage.EMBEDDING, 5, application_error
+                )
+                raise application_error from error
+
+            try:
+                await embeddings.upsert_embeddings(
+                    embedding_space_id=space.id,
+                    chunks=pending,
+                    vectors=vectors,
+                )
+                await embeddings.commit()
+            except Exception as error:
+                application_error = AppError(
+                    "EMBEDDING_PERSISTENCE_FAILED",
+                    "Document embeddings could not be persisted",
+                    retryable=True,
+                )
+                await self._persist_ingestion_failure(
+                    version_id, task.id, TaskStage.EMBEDDING, 5, application_error
+                )
+                raise application_error from error
+
+        try:
+            await embeddings.activate_if_complete(
+                version_id=version_id,
+                task_id=task.id,
+                pipeline_version=version.pipeline_version,
+                embedding_space_id=space.id,
+            )
+            await embeddings.commit()
+        except Exception as error:
+            application_error = AppError(
+                "EMBEDDING_VERIFICATION_FAILED",
+                "Document embeddings could not be activated",
+                retryable=True,
+            )
+            await self._persist_ingestion_failure(
+                version_id, task.id, TaskStage.EMBEDDING, 5, application_error
             )
             raise application_error from error
 

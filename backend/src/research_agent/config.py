@@ -1,4 +1,5 @@
 from functools import lru_cache
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -13,6 +14,11 @@ class Settings(BaseSettings):
     minio_secret_key: str = "research-secret"
     minio_bucket: str = "research-agent"
     web_origin: str = "http://localhost:3000"
+    embedding_base_url: str = "https://api.openai.com/v1"
+    embedding_api_key: str = ""
+    embedding_model: str = "text-embedding-3-small"
+    embedding_dimension: Literal[1536] = 1536
+    embedding_batch_size: int = 32
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

@@ -9,6 +9,8 @@ from research_agent.ingestion.docling_parser import DoclingDocumentParser
 from research_agent.ingestion.pipeline import IngestionPipeline
 from research_agent.papers.repository import SqlPaperRepository
 from research_agent.papers.storage import MinioObjectStorage
+from research_agent.providers.openai_embeddings import build_openai_embedding_provider
+from research_agent.retrieval.repository import SqlEmbeddingRepository
 from research_agent.shared.db import build_async_engine, build_session_factory
 from research_agent.shared.errors import AppError, TransientInfrastructureError
 from research_agent.tasks.celery_app import celery_app
@@ -60,4 +62,15 @@ def _build_pipeline(
     storage = MinioObjectStorage.from_settings(settings)
     parser = DoclingDocumentParser()
     chunker = StructuralChunker()
-    return IngestionPipeline(parser, storage, papers, tasks, chunker)
+    embeddings = SqlEmbeddingRepository(session)
+    provider = build_openai_embedding_provider(settings)
+    return IngestionPipeline(
+        parser,
+        storage,
+        papers,
+        tasks,
+        chunker,
+        embedding_provider=provider,
+        embedding_repository=embeddings,
+        embedding_batch_size=settings.embedding_batch_size,
+    )
