@@ -1,11 +1,13 @@
 from dataclasses import dataclass
+from typing import Any
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from research_agent.ingestion.models import DocumentChunkModel
+from research_agent.ingestion.chunker import lexical_text
 from research_agent.papers.domain import DocumentStatus, VersionStatus
 from research_agent.papers.models import (
     DocumentModel,
@@ -16,6 +18,7 @@ from research_agent.retrieval.models import (
     ChunkEmbeddingModel,
     EmbeddingSpaceModel,
 )
+from research_agent.retrieval.domain import RetrievalCandidate, RetrievalQuery
 from research_agent.shared.ids import EntityId, new_id
 from research_agent.tasks.domain import TaskStage, TaskStatus
 
@@ -23,6 +26,11 @@ from research_agent.tasks.domain import TaskStage, TaskStatus
 class EmbeddingPersistenceError(Exception):
     def __init__(self) -> None:
         super().__init__("embedding persistence failed")
+
+
+class RetrievalPersistenceError(Exception):
+    def __init__(self) -> None:
+        super().__init__("retrieval persistence failed")
 
 
 class IncompleteEmbeddingsError(Exception):
@@ -106,8 +114,7 @@ class SqlEmbeddingRepository:
                     ChunkEmbeddingModel,
                     and_(
                         ChunkEmbeddingModel.chunk_id == DocumentChunkModel.id,
-                        ChunkEmbeddingModel.embedding_space_id
-                        == embedding_space_id,
+                        ChunkEmbeddingModel.embedding_space_id == embedding_space_id,
                     ),
                 )
                 .where(
@@ -207,8 +214,7 @@ class SqlEmbeddingRepository:
                     ChunkEmbeddingModel,
                     and_(
                         ChunkEmbeddingModel.chunk_id == DocumentChunkModel.id,
-                        ChunkEmbeddingModel.embedding_space_id
-                        == embedding_space_id,
+                        ChunkEmbeddingModel.embedding_space_id == embedding_space_id,
                     ),
                 )
                 .where(
@@ -271,3 +277,160 @@ def _embedding_space(model: EmbeddingSpaceModel) -> EmbeddingSpace:
         pipeline_version=model.pipeline_version,
         active=model.active,
     )
+
+
+class SqlHybridRetrievalRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def lexical_search(
+        self,
+        query: RetrievalQuery,
+        *,
+        limit: int,
+    ) -> list[RetrievalCandidate]:
+        _validate_limit(limit)
+        query_pairs = [
+            (
+                func.websearch_to_tsquery("english", lexical_query.strip()),
+                func.plainto_tsquery("simple", lexical_text(lexical_query)),
+            )
+            for lexical_query in query.lexical_queries
+        ]
+        scores = [
+            rank_expression
+            for english_query, chinese_query in query_pairs
+            for rank_expression in (
+                func.ts_rank_cd(DocumentChunkModel.search_vector_en, english_query),
+                func.ts_rank_cd(DocumentChunkModel.search_vector_zh, chinese_query),
+            )
+        ]
+        score = func.greatest(*scores)
+        matches = [
+            match_expression
+            for english_query, chinese_query in query_pairs
+            for match_expression in (
+                DocumentChunkModel.search_vector_en.op("@@")(english_query),
+                DocumentChunkModel.search_vector_zh.op("@@")(chinese_query),
+            )
+        ]
+        rank = (
+            func.row_number()
+            .over(order_by=(score.desc(), DocumentChunkModel.id))
+            .label("rank")
+        )
+        statement = (
+            _candidate_select(rank)
+            .where(or_(*matches))
+            .order_by(score.desc(), DocumentChunkModel.id)
+            .limit(limit)
+        )
+        statement = _apply_scope(statement, query)
+        try:
+            rows = (await self._session.execute(statement)).all()
+        except SQLAlchemyError as error:
+            raise RetrievalPersistenceError() from error
+        return [_candidate(row, lexical_rank=int(row.rank)) for row in rows]
+
+    async def vector_search(
+        self,
+        query: RetrievalQuery,
+        query_vector: list[float],
+        *,
+        limit: int,
+    ) -> list[RetrievalCandidate]:
+        _validate_limit(limit)
+        if len(query_vector) != 1536:
+            raise ValueError("query vector must contain 1536 dimensions")
+        distance = ChunkEmbeddingModel.embedding.cosine_distance(query_vector)
+        rank = (
+            func.row_number()
+            .over(order_by=(distance, DocumentChunkModel.id))
+            .label("rank")
+        )
+        statement = (
+            _candidate_select(rank)
+            .join(
+                ChunkEmbeddingModel,
+                ChunkEmbeddingModel.chunk_id == DocumentChunkModel.id,
+            )
+            .join(
+                EmbeddingSpaceModel,
+                EmbeddingSpaceModel.id == ChunkEmbeddingModel.embedding_space_id,
+            )
+            .where(
+                EmbeddingSpaceModel.active.is_(True),
+                EmbeddingSpaceModel.pipeline_version
+                == DocumentChunkModel.pipeline_version,
+            )
+            .order_by(distance, DocumentChunkModel.id)
+            .limit(limit)
+        )
+        statement = _apply_scope(statement, query)
+        try:
+            rows = (await self._session.execute(statement)).all()
+        except SQLAlchemyError as error:
+            raise RetrievalPersistenceError() from error
+        return [_candidate(row, vector_rank=int(row.rank)) for row in rows]
+
+
+def _candidate_select(rank: Any) -> Any:
+    return (
+        select(
+            DocumentChunkModel.id.label("chunk_id"),
+            DocumentModel.id.label("document_id"),
+            DocumentVersionModel.id.label("document_version_id"),
+            DocumentModel.title,
+            DocumentChunkModel.section_path,
+            DocumentChunkModel.content,
+            DocumentChunkModel.page_start,
+            DocumentChunkModel.page_end,
+            rank,
+        )
+        .select_from(DocumentChunkModel)
+        .join(
+            DocumentVersionModel,
+            DocumentVersionModel.id == DocumentChunkModel.document_version_id,
+        )
+        .join(
+            DocumentModel,
+            DocumentModel.id == DocumentVersionModel.document_id,
+        )
+        .where(
+            DocumentVersionModel.status == VersionStatus.READY,
+            DocumentModel.status == DocumentStatus.READY,
+            DocumentModel.current_version_id == DocumentVersionModel.id,
+            DocumentChunkModel.content_type != "reference",
+        )
+    )
+
+
+def _apply_scope(statement: Any, query: RetrievalQuery) -> Any:
+    if query.scope.document_ids:
+        return statement.where(DocumentModel.id.in_(query.scope.document_ids))
+    return statement
+
+
+def _candidate(
+    row: Any,
+    *,
+    lexical_rank: int | None = None,
+    vector_rank: int | None = None,
+) -> RetrievalCandidate:
+    return RetrievalCandidate(
+        chunk_id=row.chunk_id,
+        document_id=row.document_id,
+        document_version_id=row.document_version_id,
+        title=row.title,
+        section_path=tuple(row.section_path),
+        content=row.content,
+        page_start=row.page_start,
+        page_end=row.page_end,
+        lexical_rank=lexical_rank,
+        vector_rank=vector_rank,
+    )
+
+
+def _validate_limit(limit: int) -> None:
+    if limit <= 0:
+        raise ValueError("retrieval limit must be positive")
