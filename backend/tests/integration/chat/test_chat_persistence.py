@@ -36,7 +36,7 @@ def candidate(document_id: UUID) -> RetrievalCandidate:
     )
 
 
-def fake_llm() -> FakeLLMProvider:
+def fake_llm(source: RetrievalCandidate) -> FakeLLMProvider:
     return FakeLLMProvider(
         {
             "plan_query": {
@@ -45,7 +45,23 @@ def fake_llm() -> FakeLLMProvider:
                 "lexical_queries": ["method visible regions"],
                 "semantic_query": "method visible regions",
             },
-            "generate_draft": {"text": "The method uses visible regions."},
+            "generate_draft": {
+                "blocks": [
+                    {
+                        "type": "paper_evidence",
+                        "text": "The method uses visible regions.",
+                        "citations": [
+                            {
+                                "chunk_id": str(source.chunk_id),
+                                "document_version_id": str(
+                                    source.document_version_id
+                                ),
+                                "quote": source.content,
+                            }
+                        ],
+                    }
+                ]
+            },
         }
     )
 
@@ -61,8 +77,9 @@ async def test_successful_chat_survives_process_restart(
 
     async with first_factory() as first_session:
         first_repository = SqlChatRepository(first_session)
-        retrieval = StubRetrieval([candidate(document_id)])
-        dependencies = GraphDependencies(fake_llm(), retrieval, first_repository)
+        source = candidate(document_id)
+        retrieval = StubRetrieval([source])
+        dependencies = GraphDependencies(fake_llm(source), retrieval, first_repository)
         async with persistent_chat_graph(
             migrated_database_url, dependencies
         ) as first_graph:
@@ -84,7 +101,7 @@ async def test_successful_chat_survives_process_restart(
     async with second_factory() as second_session:
         second_repository = SqlChatRepository(second_session)
         dependencies = GraphDependencies(
-            fake_llm(), StubRetrieval([]), second_repository
+            fake_llm(source), StubRetrieval([]), second_repository
         )
         async with persistent_chat_graph(
             migrated_database_url, dependencies
@@ -102,7 +119,9 @@ async def test_successful_chat_survives_process_restart(
     assert retrieval.queries[0].scope.document_ids == (document_id,)
     assert result.answer.text == "The method uses visible regions."
     assert [message.role for message in messages] == ["user", "assistant"]
-    assert messages[1].content["text"] == result.answer.text
+    blocks = messages[1].content["blocks"]
+    assert isinstance(blocks, list)
+    assert blocks[0]["text"] == result.answer.text
     assert persisted_run is not None
     assert persisted_run.status == "SUCCEEDED"
     assert [event.sequence for event in events] == list(range(1, len(events) + 1))

@@ -1,9 +1,9 @@
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal, NotRequired, TypedDict
+from typing import Annotated, Literal, NotRequired, TypedDict
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from research_agent.retrieval.domain import (
     RetrievalCandidate,
@@ -37,17 +37,105 @@ class QueryPlan(BaseModel):
         return value
 
 
-class AnswerDraft(BaseModel):
-    """Task-12 draft envelope; Task 13 replaces text with labelled blocks."""
+class CitationDraft(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
+    chunk_id: UUID
+    document_version_id: UUID | None = None
+    quote: str
+
+    @field_validator("quote")
+    @classmethod
+    def reject_blank_quote(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("citation quote must not be blank")
+        return value
+
+
+class PaperEvidenceBlock(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["paper_evidence"] = "paper_evidence"
     text: str
+    citations: list[CitationDraft]
+
+    @field_validator("text")
+    @classmethod
+    def reject_blank_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("paper evidence text must not be blank")
+        return value
+
+
+class ModelKnowledgeBlock(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["model_knowledge"] = "model_knowledge"
+    text: str
+
+    @field_validator("text")
+    @classmethod
+    def reject_blank_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("model knowledge text must not be blank")
+        return value
+
+
+DraftAnswerBlock = Annotated[
+    PaperEvidenceBlock | ModelKnowledgeBlock,
+    Field(discriminator="type"),
+]
+
+
+class AnswerDraft(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    blocks: list[DraftAnswerBlock]
+
+    @field_validator("blocks")
+    @classmethod
+    def reject_empty_answer(cls, value: list[DraftAnswerBlock]) -> list[DraftAnswerBlock]:
+        if not value:
+            raise ValueError("answer draft must contain at least one block")
+        return value
+
+
+class VerifiedCitation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    chunk_id: UUID
+    document_id: UUID
+    document_version_id: UUID
+    title: str
+    section_path: tuple[str, ...]
+    page_start: int
+    page_end: int
+    quote: str
+
+
+class VerifiedPaperEvidenceBlock(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["paper_evidence"] = "paper_evidence"
+    text: str
+    citations: list[VerifiedCitation]
+
+
+VerifiedAnswerBlock = Annotated[
+    VerifiedPaperEvidenceBlock | ModelKnowledgeBlock,
+    Field(discriminator="type"),
+]
 
 
 class VerifiedAnswer(BaseModel):
-    """Task-12 verified envelope; deterministic citation details arrive in Task 13."""
+    model_config = ConfigDict(extra="forbid")
 
-    text: str
+    blocks: list[VerifiedAnswerBlock]
     warnings: list[str] = Field(default_factory=list)
+
+    @property
+    def text(self) -> str:
+        return "\n\n".join(block.text for block in self.blocks)
 
 
 class ChatGraphState(TypedDict):

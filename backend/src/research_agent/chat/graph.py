@@ -1,7 +1,8 @@
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, Protocol
+from uuid import UUID
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -9,13 +10,16 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from sqlalchemy.engine import make_url
 
+from research_agent.chat.citations import CitationVerifier
 from research_agent.chat.domain import (
     AnswerDraft,
     ChatGraphState,
+    ChatRunEventRecord,
+    ChatMessageRecord,
+    ModelKnowledgeBlock,
     QueryPlan,
     VerifiedAnswer,
 )
-from research_agent.chat.repository import ChatRepository
 from research_agent.providers.protocols import ChatTurn, LLMProvider
 from research_agent.retrieval.domain import (
     RetrievalCandidate,
@@ -27,11 +31,22 @@ class CandidateRetriever(Protocol):
     async def retrieve(self, query: RetrievalQuery) -> list[RetrievalCandidate]: ...
 
 
+class GraphChatRepository(Protocol):
+    async def record_event(
+        self, *, run_id: UUID, event_type: str, payload: dict[str, object]
+    ) -> ChatRunEventRecord | object: ...
+
+    async def complete_run(
+        self, *, run_id: UUID, answer: VerifiedAnswer
+    ) -> ChatMessageRecord | object: ...
+
+
 @dataclass(frozen=True, slots=True)
 class GraphDependencies:
     llm: LLMProvider
     retrieval: CandidateRetriever
-    chats: ChatRepository
+    chats: GraphChatRepository
+    verifier: CitationVerifier = field(default_factory=CitationVerifier)
 
 
 def route_after_evidence_check(
@@ -97,17 +112,18 @@ def compile_chat_graph(
         return {"evidence_sufficient": sufficient}
 
     async def generate_draft(state: ChatGraphState) -> dict[str, object]:
-        evidence_text = "\n\n".join(
-            f"[{item.chunk_id}] {item.title}, pages {item.page_start}-{item.page_end}\n"
-            f"{item.content}"
-            for item in state.get("evidence", [])
-        )
+        evidence_text = _evidence_text(state.get("evidence", []))
         draft = await dependencies.llm.generate_structured(
             operation="generate_draft",
             messages=[
                 ChatTurn(
                     role="system",
-                    content="Answer from the supplied paper evidence only.",
+                    content=(
+                        "Return labelled answer blocks. Paper claims must use "
+                        "paper_evidence with supplied chunk IDs, document version IDs, "
+                        "and verbatim quotes. General background must use "
+                        "model_knowledge."
+                    ),
                 ),
                 ChatTurn(
                     role="user",
@@ -130,26 +146,77 @@ def compile_chat_graph(
         )
         return {
             "draft": AnswerDraft(
-                text=(
-                    "The selected papers do not provide enough evidence to answer "
-                    "this question. Please narrow the question or select more papers."
-                )
+                blocks=[
+                    ModelKnowledgeBlock(
+                        text=(
+                            "The selected papers do not provide enough evidence to "
+                            "answer this question. Please narrow the question or "
+                            "select more papers."
+                        )
+                    )
+                ]
             ),
             "warnings": [warning],
         }
 
     async def verify_citations(state: ChatGraphState) -> dict[str, object]:
-        # Task 13 replaces this envelope pass-through with deterministic citation checks.
-        # 任务 13 会以确定性的引文校验替换当前的封装透传。
         draft = state.get("draft")
         if draft is None:
             raise ValueError("answer draft is missing")
+        evidence = state.get("evidence", [])
+        warnings = list(state.get("warnings", []))
+        verification = dependencies.verifier.verify_answer(draft, evidence)
+        repaired = False
+        if verification.failed_block_indexes:
+            repaired = True
+            repaired_draft = await dependencies.llm.generate_structured(
+                operation="repair_citations",
+                messages=[
+                    ChatTurn(
+                        role="system",
+                        content=(
+                            "Remove or rewrite unsupported claims. Use only the supplied "
+                            "chunk IDs and verbatim quotes. Do not convert unsupported "
+                            "content into paper evidence. General background may appear "
+                            "only in a model_knowledge block."
+                        ),
+                    ),
+                    ChatTurn(
+                        role="user",
+                        content=(
+                            f"Draft:\n{draft.model_dump_json()}\n\n"
+                            f"Evidence:\n{_evidence_text(evidence)}"
+                        ),
+                    ),
+                ],
+                output_type=AnswerDraft,
+            )
+            verification = dependencies.verifier.verify_answer(
+                repaired_draft, evidence
+            )
+            if verification.failed_block_indexes:
+                warnings.extend(
+                    [
+                        "CITATION_VERIFICATION_FAILED",
+                        "INSUFFICIENT_PAPER_EVIDENCE",
+                    ]
+                )
+            else:
+                warnings.append("CITATIONS_REPAIRED")
+
         verified = VerifiedAnswer(
-            text=draft.text,
-            warnings=list(state.get("warnings", [])),
+            blocks=verification.answer.blocks,
+            warnings=_unique(warnings),
+        )
+        citation_count = sum(
+            len(block.citations)
+            for block in verified.blocks
+            if block.type == "paper_evidence"
         )
         await dependencies.chats.record_event(
-            run_id=state["run_id"], event_type="answer_verified", payload={}
+            run_id=state["run_id"],
+            event_type="answer_verified",
+            payload={"citation_count": citation_count, "repaired": repaired},
         )
         return {"verified_answer": verified}
 
@@ -205,3 +272,18 @@ def _checkpoint_database_url(database_url: str) -> str:
     if url.drivername not in {"postgresql", "postgresql+asyncpg", "postgresql+psycopg"}:
         raise ValueError("LangGraph checkpointing requires PostgreSQL")
     return url.set(drivername="postgresql").render_as_string(hide_password=False)
+
+
+def _evidence_text(evidence: list[RetrievalCandidate]) -> str:
+    return "\n\n".join(
+        f"chunk_id={item.chunk_id}\n"
+        f"document_version_id={item.document_version_id}\n"
+        f"title={item.title}\n"
+        f"pages={item.page_start}-{item.page_end}\n"
+        f"content={item.content}"
+        for item in evidence
+    )
+
+
+def _unique(values: list[str]) -> list[str]:
+    return list(dict.fromkeys(values))
