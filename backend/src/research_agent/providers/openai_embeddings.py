@@ -57,6 +57,7 @@ def build_openai_embedding_provider(
         base_url=settings.embedding_base_url,
         model=settings.embedding_model,
         dimensions=settings.embedding_dimension,
+        check_embedding_ctx_length=False,
     )
     return OpenAICompatibleEmbeddingProvider(
         client=client,

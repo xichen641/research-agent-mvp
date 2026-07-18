@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import dataclass
 from typing import Any
 
@@ -282,6 +283,7 @@ def _embedding_space(model: EmbeddingSpaceModel) -> EmbeddingSpace:
 class SqlHybridRetrievalRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+        self._search_lock = asyncio.Lock()
 
     async def lexical_search(
         self,
@@ -327,7 +329,11 @@ class SqlHybridRetrievalRepository:
         )
         statement = _apply_scope(statement, query)
         try:
-            rows = (await self._session.execute(statement)).all()
+            # RetrievalService starts both recalls together; one AsyncSession
+            # must serialize its actual SQL executions.
+            # RetrievalService 会同时启动两路召回；同一 AsyncSession 必须串行执行 SQL。
+            async with self._search_lock:
+                rows = (await self._session.execute(statement)).all()
         except SQLAlchemyError as error:
             raise RetrievalPersistenceError() from error
         return [_candidate(row, lexical_rank=int(row.rank)) for row in rows]
@@ -368,7 +374,8 @@ class SqlHybridRetrievalRepository:
         )
         statement = _apply_scope(statement, query)
         try:
-            rows = (await self._session.execute(statement)).all()
+            async with self._search_lock:
+                rows = (await self._session.execute(statement)).all()
         except SQLAlchemyError as error:
             raise RetrievalPersistenceError() from error
         return [_candidate(row, vector_rank=int(row.rank)) for row in rows]
@@ -383,6 +390,7 @@ def _candidate_select(rank: Any) -> Any:
             DocumentModel.title,
             DocumentChunkModel.section_path,
             DocumentChunkModel.content,
+            DocumentChunkModel.content_type,
             DocumentChunkModel.page_start,
             DocumentChunkModel.page_end,
             rank,
@@ -424,6 +432,7 @@ def _candidate(
         title=row.title,
         section_path=tuple(row.section_path),
         content=row.content,
+        content_type=row.content_type,
         page_start=row.page_start,
         page_end=row.page_end,
         lexical_rank=lexical_rank,

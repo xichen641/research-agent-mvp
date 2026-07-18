@@ -1,0 +1,3 @@
+{"case_id":"q1","query":"How does visible-region matching handle occlusion?","relevant_ids":["chunk-visible-region"],"retrieved_ids":["chunk-visible-region","chunk-global-baseline","chunk-loss"]}
+{"case_id":"q2","query":"Which method uses part alignment?","relevant_ids":["chunk-part-alignment","chunk-local-features"],"retrieved_ids":["chunk-background","chunk-part-alignment","chunk-local-features"]}
+{"case_id":"q3","query":"遮挡情况下如何进行局部特征匹配？","relevant_ids":["chunk-occlusion-local"],"retrieved_ids":["chunk-local-generic","chunk-occlusion-local"]}

@@ -37,6 +37,7 @@ class RetrievalCandidate:
     title: str
     section_path: tuple[str, ...]
     content: str
+    content_type: str
     page_start: int
     page_end: int
     lexical_rank: int | None = None

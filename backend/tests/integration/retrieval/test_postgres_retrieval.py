@@ -9,9 +9,11 @@ from research_agent.ingestion.models import ChunkDraft, DocumentChunkModel
 from research_agent.papers.domain import DocumentStatus, VersionStatus
 from research_agent.papers.models import DocumentModel, DocumentVersionModel
 from research_agent.papers.repository import SqlPaperRepository
+from research_agent.providers.fake import FakeEmbeddingProvider, FakeRerankerProvider
 from research_agent.retrieval.domain import RetrievalQuery, RetrievalScope
 from research_agent.retrieval.models import ChunkEmbeddingModel, EmbeddingSpaceModel
 from research_agent.retrieval.repository import SqlHybridRetrievalRepository
+from research_agent.retrieval.service import RetrievalService
 
 
 def vector(first: float, second: float = 0.0) -> list[float]:
@@ -138,7 +140,7 @@ async def test_postgres_retrieval_filters_scope_ready_current_and_active_space(
             section_path=["方法"],
             content=chinese_content,
             lexical_text=lexical_text(chinese_content),
-            content_type="text",
+            content_type="table",
             page_start=2,
             page_end=2,
             element_ids=["chinese-1"],
@@ -256,6 +258,7 @@ async def test_postgres_retrieval_filters_scope_ready_current_and_active_space(
     )
     chinese = await repository.lexical_search(chinese_query, limit=10)
     assert [candidate.chunk_id for candidate in chinese] == [chinese_chunk]
+    assert chinese[0].content_type == "table"
 
     bilingual_query = RetrievalQuery(
         original="occlusion 遮挡",
@@ -287,3 +290,11 @@ async def test_postgres_retrieval_filters_scope_ready_current_and_active_space(
         await repository.lexical_search(library_query, limit=0)
     with pytest.raises(ValueError, match="1536"):
         await repository.vector_search(library_query, [1.0], limit=10)
+
+    service = RetrievalService(
+        repository,
+        FakeEmbeddingProvider(dimension=1536),
+        FakeRerankerProvider(scores={str(scoped_chunk): 1.0}),
+    )
+    service_result = await service.retrieve(english_query)
+    assert [candidate.chunk_id for candidate in service_result] == [scoped_chunk]

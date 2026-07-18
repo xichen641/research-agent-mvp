@@ -25,15 +25,17 @@ def test_torch_is_locked_from_cpu_index_without_cuda_runtime() -> None:
     )
 
     package_names = {package["name"] for package in packages}
-    assert not {
-        name
-        for name in package_names
-        if name.startswith(("cuda-", "nvidia-"))
-    }
+    assert not {name for name in package_names if name.startswith(("cuda-", "nvidia-"))}
     torch_dependencies = {
         dependency["name"] for dependency in torch_package.get("dependencies", [])
     }
     assert torch_dependencies.isdisjoint({"cuda-bindings", "cuda-toolkit", "triton"})
-    assert not {
-        name for name in torch_dependencies if name.startswith("nvidia-")
-    }
+    assert not {name for name in torch_dependencies if name.startswith("nvidia-")}
+
+
+def test_container_installs_opencv_runtime_library() -> None:
+    dockerfile = (BACKEND / "Dockerfile").read_text("utf-8")
+
+    assert "libxcb1" in dockerfile
+    assert "libgl1" in dockerfile
+    assert "libglib2.0-0" in dockerfile
