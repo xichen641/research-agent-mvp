@@ -192,3 +192,11 @@ class ChatRunEventRecord:
 class ChatRunResult:
     run_id: UUID
     answer: VerifiedAnswer
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedChatRun:
+    run_id: UUID
+    session_id: UUID
+    question: str
+    scope: RetrievalScope

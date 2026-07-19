@@ -7,6 +7,7 @@ from research_agent.chat.domain import RetrievalScope
 from research_agent.chat.graph import GraphDependencies, persistent_chat_graph
 from research_agent.chat.repository import SqlChatRepository
 from research_agent.chat.service import ChatService
+from research_agent.chat.stream import PersistedChatStream
 from research_agent.providers.fake import FakeLLMProvider
 from research_agent.retrieval.domain import RetrievalCandidate, RetrievalQuery
 
@@ -110,6 +111,15 @@ async def test_successful_chat_survives_process_restart(
                 {"configurable": {"thread_id": str(chat_session.id)}}
             )
 
+        stream = PersistedChatStream(second_repository)
+        await stream.prepare(result.run_id)
+        streamed = "".join(
+            [chunk async for chunk in stream.iter_sse(result.run_id)]
+        )
+        events_before_second_prepare = await second_repository.list_events(
+            result.run_id
+        )
+        await stream.prepare(result.run_id)
         messages = await second_repository.list_messages(chat_session.id)
         persisted_run = await second_repository.get_run(result.run_id)
         events = await second_repository.list_events(result.run_id)
@@ -125,6 +135,17 @@ async def test_successful_chat_survives_process_restart(
     assert persisted_run is not None
     assert persisted_run.status == "SUCCEEDED"
     assert [event.sequence for event in events] == list(range(1, len(events) + 1))
+    assert len(events) == len(events_before_second_prepare)
+    assert streamed.index('"type":"start"') < streamed.index(
+        '"type":"data-workflow"'
+    )
+    assert streamed.index('"type":"text-start"') < streamed.index(
+        '"type":"text-delta"'
+    )
+    assert streamed.index('"type":"text-delta"') < streamed.index(
+        '"type":"data-citations"'
+    )
+    assert "data: [DONE]" in streamed
     assert snapshot.values["run_id"] == result.run_id
     metadata = snapshot.metadata
     assert metadata is not None

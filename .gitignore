@@ -1,4 +1,5 @@
 .env
+evaluation/papers/
 .worktrees/
 .venv/
 __pycache__/

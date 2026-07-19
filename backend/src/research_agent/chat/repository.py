@@ -60,9 +60,21 @@ class ChatRepository(Protocol):
 
     async def list_messages(self, session_id: UUID) -> list[ChatMessageRecord]: ...
 
+    async def get_message(self, message_id: UUID) -> ChatMessageRecord | None: ...
+
     async def get_run(self, run_id: UUID) -> ChatRunRecord | None: ...
 
-    async def list_events(self, run_id: UUID) -> list[ChatRunEventRecord]: ...
+    async def list_events(
+        self, run_id: UUID, *, after_sequence: int = 0
+    ) -> list[ChatRunEventRecord]: ...
+
+    async def append_events_if_absent(
+        self,
+        *,
+        run_id: UUID,
+        marker_event_type: str,
+        events: list[tuple[str, dict[str, object]]],
+    ) -> bool: ...
 
 
 class SqlChatRepository:
@@ -233,6 +245,13 @@ class SqlChatRepository:
             raise ChatPersistenceError() from None
         return [_message_record(model) for model in models]
 
+    async def get_message(self, message_id: UUID) -> ChatMessageRecord | None:
+        try:
+            model = await self._session.get(ChatMessageModel, message_id)
+        except SQLAlchemyError:
+            raise ChatPersistenceError() from None
+        return None if model is None else _message_record(model)
+
     async def get_run(self, run_id: UUID) -> ChatRunRecord | None:
         try:
             model = await self._session.get(ChatRunModel, run_id)
@@ -240,10 +259,15 @@ class SqlChatRepository:
             raise ChatPersistenceError() from None
         return None if model is None else _run_record(model)
 
-    async def list_events(self, run_id: UUID) -> list[ChatRunEventRecord]:
+    async def list_events(
+        self, run_id: UUID, *, after_sequence: int = 0
+    ) -> list[ChatRunEventRecord]:
         statement = (
             select(ChatRunEventModel)
-            .where(ChatRunEventModel.run_id == run_id)
+            .where(
+                ChatRunEventModel.run_id == run_id,
+                ChatRunEventModel.sequence > after_sequence,
+            )
             .order_by(ChatRunEventModel.sequence)
         )
         try:
@@ -251,6 +275,49 @@ class SqlChatRepository:
         except SQLAlchemyError:
             raise ChatPersistenceError() from None
         return [_event_record(model) for model in models]
+
+    async def append_events_if_absent(
+        self,
+        *,
+        run_id: UUID,
+        marker_event_type: str,
+        events: list[tuple[str, dict[str, object]]],
+    ) -> bool:
+        if not marker_event_type.strip() or not events:
+            raise ValueError("stream events and marker must not be empty")
+        try:
+            await self._lock_run(run_id)
+            marker_exists = await self._session.scalar(
+                select(ChatRunEventModel.sequence)
+                .where(
+                    ChatRunEventModel.run_id == run_id,
+                    ChatRunEventModel.event_type == marker_event_type,
+                )
+                .limit(1)
+            )
+            if marker_exists is not None:
+                await self._session.rollback()
+                return False
+            sequence = await self._next_event_sequence(run_id)
+            self._session.add_all(
+                [
+                    ChatRunEventModel(
+                        run_id=run_id,
+                        sequence=sequence + offset,
+                        event_type=event_type,
+                        payload=payload,
+                    )
+                    for offset, (event_type, payload) in enumerate(events)
+                ]
+            )
+            await self._session.commit()
+        except ChatSessionNotFoundError:
+            await self._session.rollback()
+            raise
+        except SQLAlchemyError:
+            await self._rollback_after_error()
+            raise ChatPersistenceError() from None
+        return True
 
     async def _lock_run(self, run_id: UUID) -> ChatRunModel:
         statement = select(ChatRunModel).where(ChatRunModel.id == run_id).with_for_update()

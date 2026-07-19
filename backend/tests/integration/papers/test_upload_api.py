@@ -185,6 +185,31 @@ async def test_valid_upload_returns_202_and_persists_complete_state(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_current_pdf_route_redirects_to_private_object_at_cited_page(
+    db_session: AsyncSession,
+) -> None:
+    content = b"%PDF-1.7\ncitation source"
+    storage = MemoryObjectStorage()
+    client, _ = build_client(db_session, storage)
+
+    async with client:
+        uploaded = await client.post(
+            "/api/v1/documents",
+            files={"file": ("source.pdf", content, "application/pdf")},
+        )
+        response = await client.get(
+            f"/api/v1/documents/{uploaded.json()['document_id']}/pdf?page=7",
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 307
+    assert response.headers["location"].endswith("#page=7")
+    assert "papers/" in response.headers["location"]
+    assert "source_object_key" not in response.text
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_duplicate_upload_returns_original_ids_without_second_write(
     db_session: AsyncSession,
 ) -> None:

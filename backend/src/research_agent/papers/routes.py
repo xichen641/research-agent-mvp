@@ -1,12 +1,13 @@
 from collections.abc import AsyncIterator
 import base64
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import lru_cache
 import json
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Query, UploadFile
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -142,6 +143,40 @@ async def get_document_detail(
             message="Document was not found",
         )
     return _detail_response(record)
+
+
+@router.get("/documents/{document_id}/pdf", response_class=RedirectResponse)
+async def open_document_pdf(
+    document_id: EntityId,
+    repository: Annotated[SqlPaperRepository, Depends(get_paper_repository)],
+    storage: Annotated[ObjectStorage, Depends(get_object_storage)],
+    page: Annotated[int, Query(ge=1)] = 1,
+) -> RedirectResponse:
+    """Redirect to the current private PDF without exposing its object key.
+
+    跳转到当前私有 PDF，同时不暴露对象存储键。
+    """
+
+    try:
+        document = await repository.get_document_detail(document_id)
+        if document is None:
+            raise AppError(
+                code="DOCUMENT_NOT_FOUND",
+                message="Document was not found",
+            )
+        version = await repository.get_version(document.current_version.id)
+    except PaperPersistenceError:
+        raise _paper_query_error() from None
+    if version is None or version.document_id != document_id:
+        raise AppError(
+            code="DOCUMENT_NOT_FOUND",
+            message="Document was not found",
+        )
+    url = storage.presigned_get(
+        key=version.source_object_key,
+        expires=timedelta(minutes=5),
+    )
+    return RedirectResponse(f"{url}#page={page}", status_code=307)
 
 
 def _encode_cursor(record: DocumentSummaryRecord) -> str:

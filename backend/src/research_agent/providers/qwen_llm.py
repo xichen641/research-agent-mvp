@@ -1,0 +1,151 @@
+import json
+from typing import Protocol
+
+import httpx
+from pydantic import ValidationError
+
+from research_agent.config import Settings
+from research_agent.providers.protocols import ChatTurn, OutputT
+from research_agent.shared.errors import AppError
+
+
+class AsyncHTTPClient(Protocol):
+    async def post(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str],
+        json: dict[str, object],
+    ) -> httpx.Response: ...
+
+
+class QwenLLMProvider:
+    """Project-owned structured-output adapter for Qwen's compatible API.
+
+    项目自有的通义千问兼容接口结构化输出适配器。
+    """
+
+    def __init__(
+        self,
+        *,
+        client: AsyncHTTPClient,
+        base_url: str,
+        api_key: str,
+        model_id: str,
+    ) -> None:
+        normalized_base_url = base_url.rstrip("/")
+        if not normalized_base_url.startswith("https://"):
+            raise ValueError("llm base_url must use https")
+        if not api_key.strip():
+            raise ValueError("llm api_key must not be blank")
+        if not model_id.strip():
+            raise ValueError("llm model_id must not be blank")
+        self._client = client
+        self._endpoint = f"{normalized_base_url}/chat/completions"
+        self._api_key = api_key
+        self.model_id = model_id
+
+    async def generate_structured(
+        self,
+        *,
+        operation: str,
+        messages: list[ChatTurn],
+        output_type: type[OutputT],
+    ) -> OutputT:
+        if not operation.strip():
+            raise ValueError("operation must not be blank")
+        schema = json.dumps(
+            output_type.model_json_schema(),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        instruction = (
+            "Return exactly one valid JSON object and no markdown. "
+            f"Operation: {operation}. Output type: {output_type.__name__}. "
+            f"The JSON must satisfy this JSON Schema: {schema}"
+        )
+        request_messages: list[dict[str, str]] = [
+            {"role": "system", "content": instruction},
+            *[{"role": turn.role, "content": turn.content} for turn in messages],
+        ]
+        # One bounded retry absorbs transient provider and schema failures.
+        # 仅进行一次有界重试，用于吸收瞬时服务故障或结构化输出偏差。
+        for attempt in range(2):
+            try:
+                response = await self._client.post(
+                    self._endpoint,
+                    headers={"Authorization": f"Bearer {self._api_key}"},
+                    json={
+                        "model": self.model_id,
+                        "messages": request_messages,
+                        "response_format": {"type": "json_object"},
+                    },
+                )
+            except httpx.HTTPError as error:
+                if attempt == 0:
+                    continue
+                raise _unavailable() from error
+
+            if response.status_code in {408, 429} or response.status_code >= 500:
+                if attempt == 0:
+                    continue
+                raise _unavailable()
+            if response.status_code >= 400:
+                raise AppError(
+                    "LLM_REQUEST_FAILED",
+                    "Language model request could not be completed",
+                )
+            try:
+                payload = response.json()
+                choices = payload["choices"]
+                if not isinstance(choices, list) or len(choices) != 1:
+                    raise ValueError("invalid choices")
+                choice = choices[0]
+                if not isinstance(choice, dict):
+                    raise ValueError("invalid choice")
+                message = choice.get("message")
+                if not isinstance(message, dict):
+                    raise ValueError("invalid message")
+                content = message.get("content")
+                if not isinstance(content, str):
+                    raise ValueError("invalid content")
+                return output_type.model_validate_json(content)
+            except (KeyError, TypeError, ValueError, ValidationError) as error:
+                if attempt == 0:
+                    request_messages.append(
+                        {
+                            "role": "system",
+                            "content": (
+                                "The previous response failed schema validation. "
+                                "Return a corrected JSON object matching the schema."
+                            ),
+                        }
+                    )
+                    continue
+                raise AppError(
+                    "LLM_INVALID_RESPONSE",
+                    "Language model returned an invalid structured response",
+                ) from error
+        raise _unavailable()
+
+
+def build_qwen_llm(
+    settings: Settings,
+    *,
+    client: AsyncHTTPClient | None = None,
+) -> QwenLLMProvider:
+    api_key = settings.llm_api_key or settings.embedding_api_key
+    return QwenLLMProvider(
+        client=client or httpx.AsyncClient(timeout=settings.llm_timeout_seconds),
+        base_url=settings.llm_base_url,
+        api_key=api_key,
+        model_id=settings.llm_model,
+    )
+
+
+def _unavailable() -> AppError:
+    return AppError(
+        "LLM_UNAVAILABLE",
+        "Language model is temporarily unavailable",
+        retryable=True,
+    )

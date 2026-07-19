@@ -13,3 +13,14 @@ def test_embedding_dimension_parses_from_environment_string() -> None:
 def test_embedding_dimension_rejects_unsupported_vector_size() -> None:
     with pytest.raises(ValidationError, match="1536"):
         Settings(embedding_dimension="1024")  # type: ignore[arg-type]
+
+
+def test_llm_timeout_is_long_enough_for_evidence_backed_generation() -> None:
+    settings = Settings(llm_timeout_seconds="180")  # type: ignore[arg-type]
+
+    assert settings.llm_timeout_seconds == 180.0
+
+
+def test_llm_timeout_rejects_non_positive_values() -> None:
+    with pytest.raises(ValidationError, match="positive"):
+        Settings(llm_timeout_seconds=0)

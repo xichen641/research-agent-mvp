@@ -1,7 +1,11 @@
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+_REPOSITORY_ENV = Path(__file__).resolve().parents[3] / ".env"
 
 
 class Settings(BaseSettings):
@@ -22,14 +26,28 @@ class Settings(BaseSettings):
     reranker_base_url: str = ""
     reranker_api_key: str = ""
     reranker_model: str = "qwen3-rerank"
+    llm_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    llm_api_key: str = ""
+    llm_model: str = "qwen3.7-plus"
+    llm_timeout_seconds: float = 180.0
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=(_REPOSITORY_ENV, ".env"),
+        extra="ignore",
+    )
 
     @field_validator("embedding_dimension")
     @classmethod
     def validate_embedding_dimension(cls, value: int) -> int:
         if value != 1536:
             raise ValueError("embedding_dimension must be 1536")
+        return value
+
+    @field_validator("llm_timeout_seconds")
+    @classmethod
+    def validate_llm_timeout(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("llm_timeout_seconds must be positive")
         return value
 
 

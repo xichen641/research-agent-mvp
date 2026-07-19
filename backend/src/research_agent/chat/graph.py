@@ -89,7 +89,12 @@ def compile_chat_graph(
         )
         await dependencies.chats.record_event(
             run_id=state["run_id"],
-            event_type="evidence_retrieved",
+            event_type="retrieval_completed",
+            payload={"candidate_count": len(evidence)},
+        )
+        await dependencies.chats.record_event(
+            run_id=state["run_id"],
+            event_type="rerank_completed",
             payload={"candidate_count": len(evidence)},
         )
         return {"evidence": evidence}
