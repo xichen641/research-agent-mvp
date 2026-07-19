@@ -52,6 +52,22 @@ describe("TaskProgress", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("reports durable task state to the surrounding workspace", async () => {
+    const onStateChange = vi.fn();
+    const ready = task({ status: "READY", progressCurrent: 8 });
+    render(
+      <TaskProgress
+        taskId="task-1"
+        fetchTask={vi.fn().mockResolvedValue(ready)}
+        onStateChange={onStateChange}
+      />,
+    );
+
+    await act(async () => undefined);
+
+    expect(onStateChange).toHaveBeenCalledWith(ready);
+  });
+
   it("cleans up its pending timeout when unmounted", async () => {
     const view = render(
       <TaskProgress taskId="task-1" fetchTask={vi.fn().mockResolvedValue(task())} />,

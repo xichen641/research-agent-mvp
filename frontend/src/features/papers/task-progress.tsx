@@ -10,6 +10,7 @@ type TaskProgressProps = {
   taskId: string;
   fetchTask?: (taskId: string, signal?: AbortSignal) => Promise<TaskState>;
   retryTask?: (taskId: string, signal?: AbortSignal) => Promise<TaskState>;
+  onStateChange?: (task: TaskState) => void;
 };
 
 const TERMINAL = new Set<TaskState["status"]>([
@@ -22,6 +23,7 @@ export function TaskProgress({
   taskId,
   fetchTask = getTask,
   retryTask = requestRetry,
+  onStateChange,
 }: TaskProgressProps) {
   return (
     <TaskProgressState
@@ -29,6 +31,7 @@ export function TaskProgress({
       taskId={taskId}
       fetchTask={fetchTask}
       retryTask={retryTask}
+      onStateChange={onStateChange}
     />
   );
 }
@@ -37,6 +40,7 @@ function TaskProgressState({
   taskId,
   fetchTask = getTask,
   retryTask = requestRetry,
+  onStateChange,
 }: TaskProgressProps) {
   const [task, setTask] = useState<TaskState | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
@@ -44,6 +48,11 @@ function TaskProgressState({
   const [pollGeneration, setPollGeneration] = useState(0);
   const mounted = useRef(true);
   const retryController = useRef<AbortController | null>(null);
+  const stateListener = useRef(onStateChange);
+
+  useEffect(() => {
+    stateListener.current = onStateChange;
+  }, [onStateChange]);
 
   useEffect(() => {
     mounted.current = true;
@@ -64,6 +73,7 @@ function TaskProgressState({
         const next = await fetchTask(taskId, controller.signal);
         if (stale) return;
         setTask(next);
+        stateListener.current?.(next);
         setProblem(null);
         if (!TERMINAL.has(next.status)) {
           timeout = setTimeout(poll, 2000);
@@ -100,6 +110,7 @@ function TaskProgressState({
       const queued = await retryTask(taskId, controller.signal);
       if (!mounted.current || controller.signal.aborted) return;
       setTask(queued);
+      stateListener.current?.(queued);
       setPollGeneration((value) => value + 1);
     } catch (caught) {
       if (!mounted.current || controller.signal.aborted) return;

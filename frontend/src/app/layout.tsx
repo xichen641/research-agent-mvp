@@ -1,9 +1,10 @@
 import type { Metadata } from "next";
+import { WorkspaceShell } from "@/features/workspace/workspace-shell";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "论文库 | ResearchAgent",
-  description: "上传论文并查看持久化处理进度",
+  title: "ResearchAgent 研究工作台",
+  description: "管理论文、证据问答与版本化研究笔记",
 };
 
 export default function RootLayout({
@@ -13,7 +14,9 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="zh-CN" className="h-full antialiased">
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="min-h-full">
+        <WorkspaceShell>{children}</WorkspaceShell>
+      </body>
     </html>
   );
 }

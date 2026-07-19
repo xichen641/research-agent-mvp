@@ -1,6 +1,8 @@
 import { apiRequest } from "@/lib/api";
 import type { PaperList, TaskState, UploadReceipt } from "./types";
 
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+
 type UploadReceiptWire = {
   document_id: string;
   version_id: string;
@@ -94,6 +96,10 @@ export async function retryTask(
       signal,
     }),
   );
+}
+
+export function documentPdfUrl(documentId: string): string {
+  return `${API_URL}/api/v1/documents/${documentId}/pdf`;
 }
 
 function mapTask(task: TaskStateWire): TaskState {
