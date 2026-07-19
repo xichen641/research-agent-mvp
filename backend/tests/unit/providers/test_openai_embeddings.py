@@ -1,6 +1,8 @@
 from unittest.mock import AsyncMock
 from unittest.mock import Mock
+from typing import cast
 
+import httpx
 import pytest
 from pydantic import SecretStr
 
@@ -92,4 +94,31 @@ def test_builder_keeps_openai_compatible_embedding_input_as_text(
         model="text-embedding-v4",
         dimensions=1536,
         check_embedding_ctx_length=False,
+    )
+
+
+def test_builder_uses_caller_owned_async_http_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    embedding_client = cast(httpx.AsyncClient, Mock())
+    constructor = Mock(return_value=Mock())
+    monkeypatch.setattr(openai_embeddings, "OpenAIEmbeddings", constructor)
+    settings = Settings(
+        embedding_api_key="secret-key",
+        embedding_base_url="https://dashscope.example/compatible-mode/v1",
+        embedding_model="text-embedding-v4",
+    )
+
+    build_openai_embedding_provider(
+        settings,
+        http_async_client=embedding_client,
+    )
+
+    constructor.assert_called_once_with(
+        api_key=SecretStr("secret-key"),
+        base_url="https://dashscope.example/compatible-mode/v1",
+        model="text-embedding-v4",
+        dimensions=1536,
+        check_embedding_ctx_length=False,
+        http_async_client=embedding_client,
     )

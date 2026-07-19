@@ -17,7 +17,10 @@ def create_celery_app(broker_url: str) -> Celery:
             },
             "research_agent.notes.generate_note": {"queue": "note_generation"},
         },
-        imports=("research_agent.ingestion.celery_tasks",),
+        imports=(
+            "research_agent.ingestion.celery_tasks",
+            "research_agent.notes.celery_tasks",
+        ),
     )
     return app
 

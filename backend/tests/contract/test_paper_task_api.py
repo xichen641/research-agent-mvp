@@ -399,6 +399,7 @@ async def test_cors_allows_only_configured_web_origin(
     assert set(allowed.headers["access-control-allow-methods"].split(", ")) == {
         "GET",
         "POST",
+        "PUT",
         "OPTIONS",
     }
     assert denied.status_code == 400

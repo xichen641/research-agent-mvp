@@ -191,7 +191,7 @@ def test_chunk_migration_has_generated_vectors_indexes_and_single_head(
     config = Config(str(Path(__file__).parents[3] / "alembic.ini"))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["0005_chat"]
+    assert script.get_heads() == ["0006_notes"]
 
 
 @pytest.mark.integration

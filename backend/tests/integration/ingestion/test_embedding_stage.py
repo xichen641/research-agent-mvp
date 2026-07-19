@@ -132,7 +132,7 @@ def test_embedding_migration_is_single_head() -> None:
     config = Config(str(Path(__file__).parents[3] / "alembic.ini"))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["0005_chat"]
+    assert script.get_heads() == ["0006_notes"]
 
 
 @pytest.mark.integration

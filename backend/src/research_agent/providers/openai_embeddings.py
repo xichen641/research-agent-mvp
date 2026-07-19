@@ -1,5 +1,6 @@
 from typing import Protocol
 
+import httpx
 from langchain_openai import OpenAIEmbeddings
 from pydantic import SecretStr
 
@@ -47,17 +48,24 @@ class OpenAICompatibleEmbeddingProvider:
 
 def build_openai_embedding_provider(
     settings: Settings,
+    *,
+    http_async_client: httpx.AsyncClient | None = None,
 ) -> OpenAICompatibleEmbeddingProvider:
-    client = OpenAIEmbeddings(
-        api_key=(
+    client_options = {
+        "api_key": (
             SecretStr(settings.embedding_api_key)
             if settings.embedding_api_key
             else None
         ),
-        base_url=settings.embedding_base_url,
-        model=settings.embedding_model,
-        dimensions=settings.embedding_dimension,
-        check_embedding_ctx_length=False,
+        "base_url": settings.embedding_base_url,
+        "model": settings.embedding_model,
+        "dimensions": settings.embedding_dimension,
+        "check_embedding_ctx_length": False,
+    }
+    if http_async_client is not None:
+        client_options["http_async_client"] = http_async_client
+    client = OpenAIEmbeddings(
+        **client_options,
     )
     return OpenAICompatibleEmbeddingProvider(
         client=client,

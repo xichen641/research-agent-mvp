@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from research_agent.chat import models as chat_models  # noqa: F401
 from research_agent.config import get_settings
 from research_agent.ingestion import models as ingestion_models  # noqa: F401
+from research_agent.notes import models as note_models  # noqa: F401
 from research_agent.papers import models as paper_models  # noqa: F401
 from research_agent.retrieval import models as retrieval_models  # noqa: F401
 from research_agent.shared.db import Base

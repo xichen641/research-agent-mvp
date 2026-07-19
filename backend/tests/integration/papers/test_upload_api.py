@@ -10,6 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from research_agent.main import create_app
+from research_agent.notes.models import PaperNoteModel
 from research_agent.papers.models import (
     DocumentModel,
     DocumentTaskModel,
@@ -169,9 +170,10 @@ async def test_valid_upload_returns_202_and_persists_complete_state(
         DocumentVersionModel,
         DocumentTaskModel,
         OutboxEventModel,
+        PaperNoteModel,
     ):
         counts.append(await db_session.scalar(select(func.count()).select_from(model)))
-    assert counts == [1, 1, 1, 1]
+    assert counts == [1, 1, 1, 1, 0]
 
     outbox = (await db_session.scalars(select(OutboxEventModel))).one()
     assert outbox.event_type == "document.uploaded"

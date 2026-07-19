@@ -14,6 +14,7 @@ from research_agent.chat.application import (
     production_chat_application,
 )
 from research_agent.chat.routes import ChatCommands, router as chat_router
+from research_agent.notes.routes import router as notes_router
 from research_agent.papers.routes import router as papers_router
 from research_agent.config import get_settings
 from research_agent.shared.db import async_session_factory
@@ -107,7 +108,7 @@ def create_app(
         CORSMiddleware,
         allow_origins=allowed_origins,
         allow_credentials=False,
-        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_methods=["GET", "POST", "PUT", "OPTIONS"],
         allow_headers=["Content-Type", "X-Trace-ID", "Last-Event-ID"],
     )
 
@@ -135,6 +136,7 @@ def create_app(
             "CHAT_SESSION_NOT_FOUND": 404,
             "INVALID_LAST_EVENT_ID": 400,
             "INVALID_CHAT_SCOPE": 400,
+            "NOTE_NOT_FOUND": 404,
         }
         status = status_by_code.get(error.code, 503 if error.retryable else 500)
         return JSONResponse(
@@ -159,6 +161,7 @@ def create_app(
     app.include_router(papers_router, prefix="/api/v1")
     app.include_router(tasks_router, prefix="/api/v1")
     app.include_router(chat_router, prefix="/api/v1")
+    app.include_router(notes_router, prefix="/api/v1")
 
     return app
 

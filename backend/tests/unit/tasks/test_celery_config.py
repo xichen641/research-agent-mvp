@@ -24,7 +24,10 @@ def test_celery_app_uses_durable_delivery_settings_and_exact_routes() -> None:
         "research_agent.ingestion.process_document": {"queue": "paper_ingestion"},
         "research_agent.notes.generate_note": {"queue": "note_generation"},
     }
-    assert app.conf.imports == ("research_agent.ingestion.celery_tasks",)
+    assert app.conf.imports == (
+        "research_agent.ingestion.celery_tasks",
+        "research_agent.notes.celery_tasks",
+    )
 
 
 def test_process_document_has_bounded_transient_autoretry_contract() -> None:
