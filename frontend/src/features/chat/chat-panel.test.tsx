@@ -10,6 +10,7 @@ describe("ChatPanel", () => {
         messages={[
           {
             id: "m1",
+            role: "assistant",
             blocks: [
               {
                 type: "paper_evidence",

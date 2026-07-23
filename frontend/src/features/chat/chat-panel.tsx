@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import { CitationPanel } from "./citation-panel";
 import type { ChatMessage, Citation, WorkflowUpdate } from "./types";
@@ -29,16 +29,23 @@ export function ChatPanel({
   onSubmit,
 }: ChatPanelProps) {
   const [question, setQuestion] = useState("");
+  const formRef = useRef<HTMLFormElement>(null);
   const [selectedCitationId, setSelectedCitationId] = useState<string | null>(
     null,
   );
   const citations = useMemo(
-    () => messages.flatMap((message) => message.citations ?? []),
+    () => messages.flatMap((message) => (
+      message.role === "assistant" ? message.citations ?? [] : []
+    )),
     [messages],
   );
   const selectedCitation = citations.find(
     (citation) => citation.id === selectedCitationId,
   );
+
+  useEffect(() => {
+    formRef.current?.setAttribute("data-hydrated", "true");
+  }, []);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -67,15 +74,42 @@ export function ChatPanel({
         <div className="space-y-5" aria-live="polite">
           {messages.length === 0 && (
             <p className="rounded-2xl border border-dashed border-slate-300 p-8 text-center text-slate-500">
-              选择论文后提出一个问题，回答会在引用校验完成后显示。
+              提出研究问题后，问题与经过引用校验的回答会以对话形式显示。
             </p>
           )}
           {messages.map((message) => {
+            if (message.role === "user") {
+              return (
+                <article key={message.id} className="flex justify-end">
+                  <div className="max-w-[85%] rounded-2xl rounded-br-md bg-blue-600 px-5 py-3.5 text-white shadow-sm">
+                    <p className="mb-1 text-xs font-semibold text-blue-100">你</p>
+                    <p className="whitespace-pre-wrap leading-7">{message.text}</p>
+                  </div>
+                </article>
+              );
+            }
             const citationById = new Map(
               (message.citations ?? []).map((citation) => [citation.id, citation]),
             );
             return (
               <article key={message.id} className="space-y-4">
+                <p className="text-xs font-semibold text-slate-500">ResearchAgent</p>
+                {message.streamingText !== undefined && message.blocks.length === 0 && (
+                  <div
+                    aria-label="ResearchAgent 回答"
+                    className="rounded-2xl rounded-bl-md border border-blue-100 bg-blue-50 p-5 text-slate-900"
+                  >
+                    <p className="whitespace-pre-wrap leading-7">
+                      {message.streamingText || "正在生成回答…"}
+                    </p>
+                    {message.streaming && (
+                      <span className="mt-3 inline-flex items-center gap-2 text-xs font-medium text-blue-700" role="status">
+                        <span className="size-2 animate-pulse rounded-full bg-blue-500" />
+                        正在流式生成
+                      </span>
+                    )}
+                  </div>
+                )}
                 {message.blocks.map((block, index) => (
                   <div
                     key={`${message.id}-${index}`}
@@ -125,7 +159,12 @@ export function ChatPanel({
         )}
 
         {onSubmit && (
-          <form onSubmit={submit} className="mt-6 flex gap-3">
+          <form
+            ref={formRef}
+            onSubmit={submit}
+            data-hydrated="false"
+            className="mt-6 flex gap-3"
+          >
             <label htmlFor="chat-question" className="sr-only">
               研究问题
             </label>

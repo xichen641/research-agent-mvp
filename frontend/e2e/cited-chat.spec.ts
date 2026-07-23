@@ -55,9 +55,11 @@ test("verified answer keeps model knowledge separate and opens its citation", as
   });
 
   await page.goto("/chat/session-1");
+  await expect(page.locator("form")).toHaveAttribute("data-hydrated", "true");
   await page.locator("textarea").fill("What is the core method?");
   await page.locator("form button[type=submit]").click();
 
+  await expect(page.getByText("What is the core method?")).toBeVisible();
   await expect(page.getByText("论文证据", { exact: true })).toBeVisible();
   await expect(page.getByText("模型补充", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "引用 1" }).click();

@@ -23,11 +23,22 @@ export type Citation = {
   quote: string;
 };
 
-export type ChatMessage = {
+export type UserChatMessage = {
   id: string;
+  role: "user";
+  text: string;
+};
+
+export type AssistantChatMessage = {
+  id: string;
+  role: "assistant";
   blocks: AnswerBlock[];
   citations?: Citation[];
+  streamingText?: string;
+  streaming?: boolean;
 };
+
+export type ChatMessage = UserChatMessage | AssistantChatMessage;
 
 export type WorkflowUpdate = {
   stage: "plan" | "retrieval" | "rerank" | "citation_verification" | "answer";
