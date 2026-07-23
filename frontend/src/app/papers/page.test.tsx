@@ -15,7 +15,7 @@ beforeEach(() => pushMock.mockReset());
 afterEach(() => vi.unstubAllGlobals());
 
 
-function installApi(options: { uploadDuplicate?: boolean } = {}) {
+function installApi(options: { uploadDuplicate?: boolean; secondReady?: boolean } = {}) {
   const documents = [
     {
       id: "document-ready",
@@ -29,7 +29,7 @@ function installApi(options: { uploadDuplicate?: boolean } = {}) {
     {
       id: "document-running",
       title: "Prompt guided ReID",
-      status: "PROCESSING",
+      status: options.secondReady ? "READY" : "PROCESSING",
       current_version_id: "version-running",
       latest_task_id: "task-running",
       created_at: "2026-07-18T08:00:00Z",
@@ -60,8 +60,8 @@ function installApi(options: { uploadDuplicate?: boolean } = {}) {
         id: "task-running",
         document_version_id: "version-running",
         stage: "PARSING",
-        status: "RUNNING",
-        progress_current: 3,
+        status: options.secondReady ? "READY" : "RUNNING",
+        progress_current: options.secondReady ? 8 : 3,
         progress_total: 8,
         retry_count: 0,
         error_code: null,
@@ -122,6 +122,48 @@ it("selects a paper and exposes connected research actions", async () => {
   expect(JSON.parse(String(chatRequest?.[1]?.body))).toEqual({
     title: "Visible region matching",
     document_ids: ["document-ready"],
+  });
+});
+
+
+it("starts library-wide chat with an empty document scope", async () => {
+  const fetchMock = installApi();
+  render(<PapersPage />);
+  await screen.findByRole("heading", { name: "Visible region matching" });
+
+  fireEvent.click(screen.getByRole("button", { name: "开始全库问答" }));
+
+  await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/chat/session-1"));
+  const chatRequest = fetchMock.mock.calls.find(([input]) =>
+    String(input).endsWith("/chat/sessions"),
+  );
+  expect(JSON.parse(String(chatRequest?.[1]?.body))).toEqual({
+    title: "全库论文问答",
+    document_ids: [],
+  });
+});
+
+
+it("starts a multi-paper chat with the selected ready documents", async () => {
+  const fetchMock = installApi({ secondReady: true });
+  render(<PapersPage />);
+  await screen.findByRole("heading", { name: "Visible region matching" });
+
+  fireEvent.click(screen.getByRole("checkbox", {
+    name: "将 Visible region matching 加入问答范围",
+  }));
+  fireEvent.click(screen.getByRole("checkbox", {
+    name: "将 Prompt guided ReID 加入问答范围",
+  }));
+  fireEvent.click(screen.getByRole("button", { name: "已选论文问答（2）" }));
+
+  await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/chat/session-1"));
+  const chatRequest = fetchMock.mock.calls.find(([input]) =>
+    String(input).endsWith("/chat/sessions"),
+  );
+  expect(JSON.parse(String(chatRequest?.[1]?.body))).toEqual({
+    title: "多篇论文问答（2 篇）",
+    document_ids: ["document-ready", "document-running"],
   });
 });
 

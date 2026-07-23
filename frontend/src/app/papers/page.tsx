@@ -20,6 +20,7 @@ import { ApiProblem } from "@/lib/api";
 
 
 type PaperFilter = "ALL" | "READY" | "ACTIVE" | "ATTENTION";
+type ChatLaunch = "LIBRARY" | "SELECTION" | "PAPER";
 
 const FILTERS: Array<{ value: PaperFilter; label: string }> = [
   { value: "ALL", label: "全部" },
@@ -34,12 +35,13 @@ export default function PapersPage() {
   const [taskStates, setTaskStates] = useState<Map<string, TaskState>>(new Map());
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [chatScopeIds, setChatScopeIds] = useState<string[]>([]);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<PaperFilter>("ALL");
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
-  const [startingChat, setStartingChat] = useState(false);
+  const [startingChat, setStartingChat] = useState<ChatLaunch | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
@@ -105,6 +107,11 @@ export default function PapersPage() {
     ["QUEUED", "RUNNING"].includes(effectiveStatus(paper, taskStates.get(paper.id)))
   )).length;
 
+  const selectedReadyScope = chatScopeIds.filter((documentId) => {
+    const paper = papers.find((item) => item.id === documentId);
+    return paper && isReady(paper, taskStates.get(documentId));
+  });
+
   const recordTaskState = useCallback((documentId: string, task: TaskState) => {
     setTaskStates((current) => {
       if (current.get(documentId) === task) return current;
@@ -139,17 +146,34 @@ export default function PapersPage() {
     }
   }
 
-  async function startChat() {
-    if (!selected || !isReady(selected, taskStates.get(selected.id)) || startingChat) return;
-    setStartingChat(true);
+  function toggleChatScope(documentId: string) {
+    setActionError(null);
+    if (chatScopeIds.includes(documentId)) {
+      setChatScopeIds((current) => current.filter((item) => item !== documentId));
+      return;
+    }
+    if (chatScopeIds.length >= 100) {
+      setActionError("一次最多选择 100 篇论文");
+      return;
+    }
+    setChatScopeIds((current) => [...current, documentId]);
+  }
+
+  async function startChat(
+    launch: ChatLaunch,
+    title: string,
+    documentIds: string[],
+  ) {
+    if (startingChat || (launch !== "LIBRARY" && documentIds.length === 0)) return;
+    setStartingChat(launch);
     setActionError(null);
     try {
-      const session = await createChatSession(selected.title, [selected.id]);
+      const session = await createChatSession(title, documentIds);
       router.push(`/chat/${session.id}`);
     } catch (caught) {
       setActionError(caught instanceof ApiProblem ? caught.message : "问答空间创建失败");
     } finally {
-      setStartingChat(false);
+      setStartingChat(null);
     }
   }
 
@@ -165,7 +189,7 @@ export default function PapersPage() {
               论文工作台
             </h1>
             <p className="mt-2 text-sm text-slate-500">
-              选择论文，在同一上下文中进入问答、笔记与原文。
+              选择单篇、组合多篇或检索全库，在同一上下文中进入问答、笔记与原文。
             </p>
           </div>
           <button
@@ -182,6 +206,53 @@ export default function PapersPage() {
           <Metric label="已载入论文" value={papers.length} tone="slate" />
           <Metric label="可研究" value={readyCount} tone="emerald" />
           <Metric label="处理中" value={activeCount} tone="blue" />
+        </section>
+
+        <section
+          aria-labelledby="retrieval-chat-title"
+          className="mt-5 rounded-2xl border border-blue-200 bg-gradient-to-r from-blue-50 to-white p-4 shadow-sm sm:p-5"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.16em] text-blue-700">Retrieval scope</p>
+              <h2 id="retrieval-chat-title" className="mt-1 text-lg font-semibold text-slate-950">证据检索问答</h2>
+              <p className="mt-1 text-sm text-slate-600">
+                已选择 {selectedReadyScope.length} 篇就绪论文；全库模式会检索全部 READY 当前版本。
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {chatScopeIds.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setChatScopeIds([])}
+                  className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-600 hover:border-slate-400"
+                >
+                  清空选择
+                </button>
+              )}
+              <button
+                type="button"
+                disabled={selectedReadyScope.length === 0 || startingChat !== null}
+                onClick={() => void startChat(
+                  "SELECTION",
+                  `多篇论文问答（${selectedReadyScope.length} 篇）`,
+                  selectedReadyScope,
+                )}
+                className="rounded-xl border border-blue-300 bg-white px-4 py-2.5 text-sm font-semibold text-blue-700 hover:border-blue-500 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400"
+              >
+                {startingChat === "SELECTION" ? "正在创建…" : `已选论文问答（${selectedReadyScope.length}）`}
+              </button>
+              <button
+                type="button"
+                disabled={loading || startingChat !== null}
+                onClick={() => void startChat("LIBRARY", "全库论文问答", [])}
+                className="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+              >
+                {startingChat === "LIBRARY" ? "正在创建…" : "开始全库问答"}
+              </button>
+            </div>
+          </div>
+          {actionError && <p className="mt-3 rounded-lg bg-red-50 p-3 text-sm text-red-700" role="alert">{actionError}</p>}
         </section>
 
         <div className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1fr)_360px] xl:items-start">
@@ -264,6 +335,17 @@ export default function PapersPage() {
                       taskId={paper.latestTaskId}
                       onStateChange={(state) => recordTaskState(paper.id, state)}
                     />
+                    <label className={`mt-3 flex items-center gap-2 text-xs font-medium ${isReady(paper, task) ? "text-slate-600" : "text-slate-400"}`}>
+                      <input
+                        type="checkbox"
+                        aria-label={`将 ${paper.title} 加入问答范围`}
+                        checked={chatScopeIds.includes(paper.id)}
+                        disabled={!isReady(paper, task)}
+                        onChange={() => toggleChatScope(paper.id)}
+                        className="size-4 rounded border-slate-300 text-blue-600 accent-blue-600"
+                      />
+                      {isReady(paper, task) ? "加入跨论文问答范围" : "达到 READY 后可加入问答范围"}
+                    </label>
                   </article>
                 );
               })}
@@ -285,9 +367,13 @@ export default function PapersPage() {
           <PaperInspector
             paper={selected}
             task={selected ? taskStates.get(selected.id) : undefined}
-            startingChat={startingChat}
+            startingChat={startingChat !== null}
+            startingThisPaper={startingChat === "PAPER"}
             actionError={actionError}
-            onStartChat={() => void startChat()}
+            onStartChat={() => {
+              if (!selected || !isReady(selected, taskStates.get(selected.id))) return;
+              void startChat("PAPER", selected.title, [selected.id]);
+            }}
           />
         </div>
       </div>
@@ -345,12 +431,14 @@ function PaperInspector({
   paper,
   task,
   startingChat,
+  startingThisPaper,
   actionError,
   onStartChat,
 }: {
   paper: PaperSummary | null;
   task?: TaskState;
   startingChat: boolean;
+  startingThisPaper: boolean;
   actionError: string | null;
   onStartChat: () => void;
 }) {
@@ -382,7 +470,7 @@ function PaperInspector({
             onClick={onStartChat}
             className="flex w-full items-center justify-between rounded-xl bg-blue-600 px-4 py-3 text-left text-sm font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-500"
           >
-            <span>{startingChat ? "正在创建问答…" : "开始论文问答"}</span>
+            <span>{startingThisPaper ? "正在创建问答…" : "开始论文问答"}</span>
             <span aria-hidden="true">→</span>
           </button>
           {ready ? (
