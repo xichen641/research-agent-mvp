@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://research:research@postgres:5432/research"
     redis_url: str = "redis://redis:6379/0"
     minio_endpoint: str = "minio:9000"
+    minio_public_endpoint: str = "localhost:9000"
+    minio_region: str = "us-east-1"
     minio_access_key: str = "research"
     minio_secret_key: str = "research-secret"
     minio_bucket: str = "research-agent"

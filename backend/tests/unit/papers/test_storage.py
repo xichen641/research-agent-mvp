@@ -1,7 +1,9 @@
 from datetime import timedelta
 from io import BytesIO
 from typing import BinaryIO
+from urllib.parse import urlparse
 
+from research_agent.config import Settings
 from research_agent.papers.storage import MinioObjectStorage
 
 
@@ -122,3 +124,48 @@ def test_delete_and_presign_forward_to_configured_bucket() -> None:
     assert client.remove_object_calls == [("papers", "generated.pdf")]
     assert client.presign_calls == [("papers", "generated.pdf", expires)]
     assert url == "https://example.test/presigned"
+
+
+def test_presign_uses_public_client_without_changing_internal_storage_client() -> None:
+    internal_client = FakeMinioClient()
+    public_client = FakeMinioClient()
+    storage = MinioObjectStorage(
+        internal_client,
+        "papers",
+        presign_client=public_client,
+    )
+    expires = timedelta(minutes=5)
+
+    storage.put(
+        key="source.pdf",
+        stream=BytesIO(b"pdf"),
+        content_type="application/pdf",
+    )
+    url = storage.presigned_get(key="source.pdf", expires=expires)
+
+    assert internal_client.put_object_calls[0]["key"] == "source.pdf"
+    assert internal_client.presign_calls == []
+    assert public_client.presign_calls == [("papers", "source.pdf", expires)]
+    assert url == "https://example.test/presigned"
+
+
+def test_from_settings_presigns_for_browser_without_contacting_public_endpoint() -> None:
+    settings = Settings(
+        minio_endpoint="minio:9000",
+        minio_public_endpoint="localhost:9000",
+        minio_region="us-east-1",
+        minio_access_key="research",
+        minio_secret_key="research-secret",
+        minio_bucket="research-agent",
+    )
+    storage = MinioObjectStorage.from_settings(settings)
+
+    url = storage.presigned_get(
+        key="papers/document/source/version.pdf",
+        expires=timedelta(minutes=5),
+    )
+
+    parsed = urlparse(url)
+    assert parsed.hostname == "localhost"
+    assert parsed.port == 9000
+    assert "X-Amz-Signature" in parsed.query

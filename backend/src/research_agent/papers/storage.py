@@ -76,8 +76,15 @@ class _ResponseStream(RawIOBase):
 
 
 class MinioObjectStorage:
-    def __init__(self, client: _MinioClient, bucket: str) -> None:
+    def __init__(
+        self,
+        client: _MinioClient,
+        bucket: str,
+        *,
+        presign_client: _MinioClient | None = None,
+    ) -> None:
         self._client = client
+        self._presign_client = presign_client or client
         self._bucket = bucket
         self._bucket_ready = False
         self._bucket_lock = Lock()
@@ -92,6 +99,13 @@ class MinioObjectStorage:
                 secure=False,
             ),
             settings.minio_bucket,
+            presign_client=Minio(
+                settings.minio_public_endpoint,
+                access_key=settings.minio_access_key,
+                secret_key=settings.minio_secret_key,
+                secure=False,
+                region=settings.minio_region,
+            ),
         )
 
     def put(self, *, key: str, stream: BinaryIO, content_type: str) -> None:
@@ -116,7 +130,7 @@ class MinioObjectStorage:
         self._client.remove_object(self._bucket, key)
 
     def presigned_get(self, *, key: str, expires: timedelta) -> str:
-        return self._client.presigned_get_object(
+        return self._presign_client.presigned_get_object(
             self._bucket,
             key,
             expires=expires,
