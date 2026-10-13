@@ -21,7 +21,19 @@
 - Default services bind to localhost. MinIO buckets are private.
 - Automatic tests use fake model providers. Real-provider tests are explicit smoke or evaluation commands.
 - MVP release gate: at least 30 real papers, 50 labelled questions, parse success at least 95%, Recall@10 at least 85%, citation correctness at least 90%, and model-knowledge labelling at 100%.
-- The user performs Git commits. Agentic workers may prepare and show exact Git commands but must not execute git commit unless the user explicitly authorizes it in that turn.
+- Starting with Product Task 2, the user grants standing authorization for an Agent to stage the exact task-scoped tracked files and execute `git commit` after all required verification passes and independent task review is clean. The Agent must report the committed scope, message, and verification evidence. This standing authorization does not include `git push`, merge, worktree removal, or ignored SDD artifacts; each integration or cleanup operation still requires separate explicit user authorization.
+
+## Bilingual Document Directory Contract (Effective from Product Task 2)
+
+- New formal specifications use `docs/superpowers/specs/EN/<same-filename>.md` and `docs/superpowers/specs/CN/<same-filename>.md`. New formal implementation plans use `docs/superpowers/plans/EN/<same-filename>.md` and `docs/superpowers/plans/CN/<same-filename>.md`.
+- SDD workflow artifacts use `.superpowers/sdd/EN/task-N-{brief,report,review}.md` and `.superpowers/sdd/CN/task-N-{brief,report,review}.md`; progress uses `.superpowers/sdd/EN/progress.md` and `.superpowers/sdd/CN/progress.md`. Corresponding English and Chinese files use the same filename and do not use a `.zh-CN` suffix.
+- English is the canonical source. Chinese companions must faithfully preserve the English implementation meaning and must keep every code block, command, path, interface name, dependency version, hash, expected result, test evidence, raw log, and task boundary unchanged.
+- Each English document links to its Chinese companion with `../CN/<same-filename>`, and each Chinese document links to its English canonical source with `../EN/<same-filename>`.
+- The controller owns each bilingual Brief pair and the bilingual Progress pair. The implementer owns each bilingual Report pair. The reviewer owns each bilingual Review pair.
+- Synchronization is a handoff gate: the responsible role must create or update both language files and verify their semantic alignment before handing work to the next role.
+- After each product task, the controller must stop at a user acceptance checkpoint. The next product task may not start until the user explicitly authorizes it.
+- Existing formal documents and Product Task 1 SDD artifacts remain in their current locations. Product Task 1 must not be rerun, retested, re-reviewed, moved, or retroactively backfilled.
+- Starting with Product Task 2, the user grants standing authorization for an Agent to stage the exact task-scoped tracked files and execute `git commit` after all required verification passes and independent task review is clean. The Agent must report the committed scope, message, and verification evidence. This standing authorization does not include `git push`, merge, worktree removal, or ignored `.superpowers/sdd` workflow artifacts; each integration or cleanup operation still requires separate explicit user authorization.
 
 ## Plan Scope and Checkpoints
 
@@ -278,6 +290,7 @@ Create .gitignore:
 
 ~~~gitignore
 .env
+.worktrees/
 .venv/
 __pycache__/
 .pytest_cache/
@@ -455,13 +468,14 @@ git commit -m "chore: scaffold ResearchAgent services"
 
 **Interfaces:**
 - Consumes: Settings from Task 1
-- Produces: new_id, AppError, ChatTurn, GeneratedObject, LLMProvider, EmbeddingProvider, RerankerProvider, FakeLLMProvider, FakeEmbeddingProvider, FakeRerankerProvider
+- Produces: new_id, AppError, ChatTurn, LLMProvider, EmbeddingProvider, RerankerProvider, FakeLLMProvider, FakeEmbeddingProvider, FakeRerankerProvider
 
 - [ ] **Step 1: Write failing provider contract tests**
 
 Create backend/tests/unit/providers/test_fake_providers.py:
 
 ~~~python
+import pytest
 from pydantic import BaseModel
 
 from research_agent.providers.fake import (
@@ -476,6 +490,7 @@ class ExampleOutput(BaseModel):
     label: str
 
 
+@pytest.mark.asyncio
 async def test_fake_llm_returns_registered_structured_output() -> None:
     provider = FakeLLMProvider({"example": {"label": "ok"}})
 
@@ -488,6 +503,7 @@ async def test_fake_llm_returns_registered_structured_output() -> None:
     assert result == ExampleOutput(label="ok")
 
 
+@pytest.mark.asyncio
 async def test_fake_embedding_is_deterministic() -> None:
     provider = FakeEmbeddingProvider(dimension=4)
 
@@ -498,6 +514,22 @@ async def test_fake_embedding_is_deterministic() -> None:
     assert len(first) == 4
 
 
+@pytest.mark.asyncio
+async def test_fake_embedding_supports_dimensions_larger_than_one_digest() -> None:
+    provider = FakeEmbeddingProvider(dimension=33)
+
+    result = await provider.embed_query("same")
+
+    assert len(result) == 33
+
+
+@pytest.mark.parametrize("dimension", [0, -1])
+def test_fake_embedding_rejects_non_positive_dimension(dimension: int) -> None:
+    with pytest.raises(ValueError, match="dimension must be positive"):
+        FakeEmbeddingProvider(dimension=dimension)
+
+
+@pytest.mark.asyncio
 async def test_fake_reranker_orders_by_configured_score() -> None:
     provider = FakeRerankerProvider({"b": 0.9, "a": 0.2})
 
@@ -612,6 +644,8 @@ class RerankerProvider(Protocol):
 
 - [ ] **Step 5: Implement deterministic fake providers**
 
+`FakeEmbeddingProvider` must reject non-positive dimensions and must return exactly the configured length for every positive dimension. Generate domain-separated SHA-256 blocks until the requested length is filled.
+
 Create backend/src/research_agent/providers/fake.py:
 
 ~~~python
@@ -624,6 +658,9 @@ from research_agent.providers.protocols import (
     OutputT,
     RerankItem,
 )
+
+
+_EMBEDDING_DOMAIN = b"research-agent-fake-embedding\0"
 
 
 class FakeLLMProvider:
@@ -654,14 +691,26 @@ class FakeEmbeddingProvider:
     model_id = "fake-embedding"
 
     def __init__(self, dimension: int = 8) -> None:
+        if dimension <= 0:
+            raise ValueError("dimension must be positive")
         self.dimension = dimension
 
     async def embed_documents(self, texts: list[str]) -> list[list[float]]:
         return [await self.embed_query(text) for text in texts]
 
     async def embed_query(self, text: str) -> list[float]:
-        digest = hashlib.sha256(text.encode("utf-8")).digest()
-        return [byte / 255.0 for byte in digest[: self.dimension]]
+        text_bytes = text.encode("utf-8")
+        values: list[float] = []
+        block_index = 0
+        while len(values) < self.dimension:
+            digest = hashlib.sha256(
+                _EMBEDDING_DOMAIN
+                + block_index.to_bytes(8, "big")
+                + text_bytes
+            ).digest()
+            values.extend(byte / 255.0 for byte in digest)
+            block_index += 1
+        return values[: self.dimension]
 
 
 class FakeRerankerProvider:
@@ -694,7 +743,7 @@ uv run ruff check src tests
 uv run pyright
 ~~~
 
-Expected: three tests pass; static checks exit 0.
+Expected: six tests pass; static checks exit 0.
 
 - [ ] **Step 7: Prepare the user commit checkpoint**
 
@@ -709,6 +758,9 @@ git commit -m "feat: define model provider contracts"
 
 **Files:**
 - Modify: backend/pyproject.toml
+- Modify: backend/uv.lock
+- Create: backend/alembic.ini
+- Create: backend/migrations/script.py.mako
 - Create: backend/src/research_agent/shared/db.py
 - Create: backend/src/research_agent/papers/domain.py
 - Create: backend/src/research_agent/papers/models.py
@@ -717,6 +769,7 @@ git commit -m "feat: define model provider contracts"
 - Create: backend/src/research_agent/tasks/repository.py
 - Create: backend/migrations/env.py
 - Create: backend/migrations/versions/0001_papers_tasks.py
+- Create: backend/tests/integration/conftest.py
 - Create: backend/tests/integration/papers/test_repository.py
 
 **Interfaces:**
@@ -728,26 +781,49 @@ git commit -m "feat: define model provider contracts"
 ~~~powershell
 Set-Location backend
 uv add sqlalchemy asyncpg alembic pgvector
-uv add --dev testcontainers
+uv add --dev "testcontainers[postgres]"
 ~~~
 
-Expected: pyproject.toml and uv.lock include the new packages.
+Register the integration marker in backend/pyproject.toml so pytest does not emit
+an unknown-marker warning:
+
+~~~toml
+[tool.pytest.ini_options]
+markers = [
+    "integration: requires Docker-backed infrastructure",
+]
+~~~
+
+Expected: pyproject.toml and uv.lock include the new packages and pytest knows
+the integration marker.
 
 - [ ] **Step 2: Write the failing repository integration test**
+
+Create backend/tests/integration/conftest.py with these responsibilities:
+
+1. Start `pgvector/pgvector:pg17` through `PostgresContainer` and expose an
+   `asyncpg` SQLAlchemy URL. The Testcontainer is the authoritative database for
+   repository integration tests; it must not depend on the Compose project.
+2. Build an Alembic `Config` from backend/alembic.ini, inject the container URL,
+   and run `upgrade head` twice before yielding a session. The second upgrade
+   proves migration idempotency.
+3. Yield a function-scoped `AsyncSession` with
+   `join_transaction_mode="create_savepoint"`, then roll back the surrounding
+   connection transaction and dispose the engine.
 
 Create backend/tests/integration/papers/test_repository.py:
 
 ~~~python
-from io import BytesIO
-
 import pytest
 
-from research_agent.papers.domain import DocumentStatus
+from research_agent.papers.domain import DocumentStatus, VersionStatus
 from research_agent.papers.repository import SqlPaperRepository
+from research_agent.tasks.domain import TaskStage, TaskStatus
 
 
 @pytest.mark.integration
-async def test_create_document_and_version(db_session) -> None:
+@pytest.mark.asyncio
+async def test_create_document_version_and_initial_task(db_session) -> None:
     repository = SqlPaperRepository(db_session)
 
     created = await repository.create_document_with_version(
@@ -765,6 +841,19 @@ async def test_create_document_and_version(db_session) -> None:
     assert loaded is not None
     assert loaded.status is DocumentStatus.PROCESSING
     assert loaded.current_version_id == created.version_id
+    assert loaded.latest_task_id == created.task_id
+
+    version = await repository.get_version(created.version_id)
+    assert version is not None
+    assert version.status is VersionStatus.PROCESSING
+
+    task = await repository.get_task(created.task_id)
+    assert task is not None
+    assert task.stage is TaskStage.QUEUED
+    assert task.status is TaskStatus.QUEUED
+
+    duplicate_lookup = await repository.find_by_sha256("a" * 64)
+    assert duplicate_lookup == loaded
 ~~~
 
 - [ ] **Step 3: Run the test and confirm model imports fail**
@@ -807,6 +896,7 @@ class VersionStatus(StrEnum):
 class CreatedDocument:
     document_id: EntityId
     version_id: EntityId
+    task_id: EntityId
 
 
 @dataclass(frozen=True, slots=True)
@@ -817,12 +907,27 @@ class DocumentRecord:
     status: DocumentStatus
     current_version_id: EntityId
     latest_task_id: EntityId
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentVersionRecord:
+    id: EntityId
+    document_id: EntityId
+    filename: str
+    source_object_key: str
+    parser_name: str
+    parser_version: str
+    pipeline_version: str
+    status: VersionStatus
 ~~~
 
 Create backend/src/research_agent/tasks/domain.py:
 
 ~~~python
+from dataclasses import dataclass
 from enum import StrEnum
+
+from research_agent.shared.ids import EntityId
 
 
 class TaskStage(StrEnum):
@@ -842,9 +947,36 @@ class TaskStatus(StrEnum):
     READY = "READY"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
+
+
+@dataclass(frozen=True, slots=True)
+class TaskRecord:
+    id: EntityId
+    document_version_id: EntityId
+    stage: TaskStage
+    status: TaskStatus
+    progress_current: int
+    progress_total: int
+    retry_count: int
+    error_code: str | None
+    error_message: str | None
 ~~~
 
-- [ ] **Step 5: Create SQLAlchemy models and migration**
+- [ ] **Step 5: Create SQLAlchemy models and a complete Alembic environment**
+
+Define the shared declarative Base, async engine factory, and
+`async_session_factory` in backend/src/research_agent/shared/db.py. Production
+defaults continue to use `Settings.database_url`; tests may inject another URL.
+
+Create backend/alembic.ini and backend/migrations/script.py.mako as part of the
+Alembic environment. backend/migrations/env.py must:
+
+1. Import every model module before reading `Base.metadata`.
+2. Prefer an explicitly injected Alembic connection when present.
+3. Otherwise read `DATABASE_URL` through `Settings` and execute migrations via
+   an async SQLAlchemy engine.
+4. Support both `uv run alembic upgrade head` and the integration fixture's
+   programmatic upgrade.
 
 Implement models with these exact durable columns:
 
@@ -912,7 +1044,13 @@ ON outbox_event (available_at)
 WHERE sent_at IS NULL;
 ~~~
 
-- [ ] **Step 6: Implement repository methods**
+- [ ] **Step 6: Implement repository protocols and SQL repositories**
+
+Define runtime-checkable `PaperRepository` and `TaskRepository` Protocols. The
+paper protocol exposes every method shown below. The task protocol exposes
+`get_task`, `update_task`, and `commit`; concrete SQL repositories must satisfy
+the protocols under Pyright without importing FastAPI, Celery, MinIO, Docling,
+or LangChain types.
 
 Create SqlPaperRepository with these signatures:
 
@@ -937,6 +1075,13 @@ class SqlPaperRepository:
 
     async def find_by_sha256(self, sha256: str) -> DocumentRecord | None: ...
 
+    async def get_version(
+        self,
+        version_id: EntityId,
+    ) -> DocumentVersionRecord | None: ...
+
+    async def get_task(self, task_id: EntityId) -> TaskRecord | None: ...
+
     async def switch_current_version(
         self,
         document_id: EntityId,
@@ -947,25 +1092,64 @@ class SqlPaperRepository:
     async def commit(self) -> None: ...
 ~~~
 
-get_document and find_by_sha256 must join the current version and most recent document task so DocumentRecord always contains current_version_id and latest_task_id for uploaded documents.
+`create_document_with_version` must create a document, its first version, and an
+initial task in one unit of work. The task starts with `stage=QUEUED`,
+`status=QUEUED`, `progress_current=0`, and `progress_total=len(TaskStage)`. This
+makes the non-null `CreatedDocument.task_id` and `DocumentRecord.latest_task_id`
+valid immediately.
+
+`get_document` and `find_by_sha256` must join the current version and select the
+most recent document task deterministically by `(created_at DESC, id DESC)`.
+`get_version` and `get_task` return their complete record types. Implement
+`SqlTaskRepository` with these signatures:
+
+~~~python
+class SqlTaskRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def get_task(self, task_id: EntityId) -> TaskRecord | None: ...
+
+    async def update_task(
+        self,
+        task_id: EntityId,
+        *,
+        stage: TaskStage,
+        status: TaskStatus,
+        progress_current: int,
+        progress_total: int,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> None: ...
+
+    async def commit(self) -> None: ...
+~~~
 
 - [ ] **Step 7: Run migrations and repository tests**
 
 ~~~powershell
 docker compose -f infra/compose.yaml up -d postgres
 Set-Location backend
+$env:DATABASE_URL = "postgresql+asyncpg://research:research@127.0.0.1:5432/research"
 uv run alembic upgrade head
-uv run pytest tests/integration/papers/test_repository.py -v
+uv run alembic upgrade head
+uv run alembic current --check-heads
+Remove-Item Env:DATABASE_URL
+uv run pytest tests/integration/papers/test_repository.py -v -m integration
 uv run ruff check src tests
 uv run pyright
 ~~~
 
-Expected: migration applies once, re-running upgrade is a no-op, and repository test passes.
+Expected: Compose PostgreSQL is reachable from the host through `127.0.0.1`, the
+first migration applies, the second upgrade is a no-op, the current revision is
+at all heads, the isolated Testcontainer repository test passes, and static
+checks pass. Always remove the temporary host `DATABASE_URL` before running the
+Testcontainer test so it cannot accidentally use Compose.
 
 - [ ] **Step 8: Prepare the user commit checkpoint**
 
 ~~~powershell
-git add backend/pyproject.toml backend/uv.lock backend/alembic.ini backend/migrations backend/src/research_agent/shared/db.py backend/src/research_agent/papers backend/src/research_agent/tasks backend/tests/integration/papers
+git add backend/pyproject.toml backend/uv.lock backend/alembic.ini backend/migrations backend/src/research_agent/shared/db.py backend/src/research_agent/papers backend/src/research_agent/tasks backend/tests/integration/conftest.py backend/tests/integration/papers
 git commit -m "feat: persist papers and processing tasks"
 ~~~
 
@@ -975,16 +1159,23 @@ git commit -m "feat: persist papers and processing tasks"
 
 **Files:**
 - Modify: backend/pyproject.toml
+- Modify: backend/uv.lock
+- Modify: backend/src/research_agent/papers/domain.py
+- Modify: backend/src/research_agent/papers/repository.py
 - Create: backend/src/research_agent/papers/storage.py
 - Create: backend/src/research_agent/papers/service.py
 - Create: backend/src/research_agent/papers/routes.py
 - Modify: backend/src/research_agent/main.py
 - Create: backend/tests/unit/papers/test_upload_service.py
+- Create: backend/tests/unit/papers/test_storage.py
+- Modify: backend/tests/integration/conftest.py
 - Create: backend/tests/integration/papers/test_upload_api.py
+- Create: backend/tests/integration/papers/test_upload_race.py
+- Create: backend/tests/integration/papers/test_minio_smoke.py
 
 **Interfaces:**
-- Consumes: PaperRepository, CreatedDocument, AppError, Settings
-- Produces: ObjectStorage, MinioObjectStorage, UploadPaperCommand, UploadReceipt, PaperService.upload_pdf, POST /api/v1/documents
+- Consumes: DocumentRecord, AppError, Settings, async_session_factory
+- Produces: UploadIds, DuplicateDocumentError, PaperPersistenceError, UploadPaperRepository, ObjectStorage, MinioObjectStorage, UploadPaperCommand, UploadReceipt, PaperService.upload_pdf, POST /api/v1/documents
 
 - [ ] **Step 1: Add object storage and multipart dependencies**
 
@@ -998,15 +1189,55 @@ uv add minio python-multipart
 Create backend/tests/unit/papers/test_upload_service.py:
 
 ~~~python
+import hashlib
 from io import BytesIO
+from typing import BinaryIO
+from uuid import UUID
 
 import pytest
 
+from research_agent.papers.domain import DocumentRecord, DocumentStatus
 from research_agent.papers.service import PaperService, UploadPaperCommand
 from research_agent.shared.errors import AppError
 
 
-async def test_upload_rejects_non_pdf(fake_paper_repository, fake_object_storage) -> None:
+class FakePaperRepository:
+    def __init__(self) -> None:
+        self.existing: DocumentRecord | None = None
+        self.created: list[dict[str, object]] = []
+        self.outbox: list[dict[str, object]] = []
+        self.commit_calls = 0
+        self.rollback_calls = 0
+
+    async def find_by_sha256(self, sha256: str) -> DocumentRecord | None:
+        if self.existing is not None and self.existing.sha256 == sha256:
+            return self.existing
+        return None
+
+    async def commit(self) -> None:
+        self.commit_calls += 1
+
+    async def rollback(self) -> None:
+        self.rollback_calls += 1
+
+
+class FakeObjectStorage:
+    def __init__(self) -> None:
+        self.put_calls: list[str] = []
+        self.delete_calls: list[str] = []
+
+    def put(self, *, key: str, stream: BinaryIO, content_type: str) -> None:
+        del stream, content_type
+        self.put_calls.append(key)
+
+    def delete(self, *, key: str) -> None:
+        self.delete_calls.append(key)
+
+
+@pytest.mark.asyncio
+async def test_upload_rejects_non_pdf() -> None:
+    fake_paper_repository = FakePaperRepository()
+    fake_object_storage = FakeObjectStorage()
     service = PaperService(fake_paper_repository, fake_object_storage)
     command = UploadPaperCommand(
         filename="paper.txt",
@@ -1020,24 +1251,50 @@ async def test_upload_rejects_non_pdf(fake_paper_repository, fake_object_storage
     assert error.value.code == "INVALID_PDF"
 
 
-async def test_duplicate_hash_returns_existing_document(
-    fake_paper_repository,
-    fake_object_storage,
-) -> None:
-    fake_paper_repository.existing_sha256 = "hash"
+@pytest.mark.asyncio
+async def test_duplicate_hash_returns_existing_document() -> None:
+    fake_paper_repository = FakePaperRepository()
+    fake_object_storage = FakeObjectStorage()
+    content = b"%PDF-1.7\ncontent"
+    fake_paper_repository.existing = DocumentRecord(
+        id=UUID("00000000-0000-0000-0000-000000000001"),
+        title="existing",
+        sha256=hashlib.sha256(content).hexdigest(),
+        status=DocumentStatus.PROCESSING,
+        current_version_id=UUID("00000000-0000-0000-0000-000000000002"),
+        latest_task_id=UUID("00000000-0000-0000-0000-000000000003"),
+    )
     service = PaperService(fake_paper_repository, fake_object_storage)
 
     receipt = await service.upload_pdf(
         UploadPaperCommand(
             filename="paper.pdf",
             content_type="application/pdf",
-            stream=BytesIO(b"%PDF-1.7\ncontent"),
+            stream=BytesIO(content),
         )
     )
 
     assert receipt.duplicate is True
     assert fake_object_storage.put_calls == []
 ~~~
+
+The fake repository also implements the exact `create_upload` and
+`add_outbox_event` signatures defined in Step 5, appending their keyword
+arguments to `created` and `outbox`. The fake storage implements `get` and
+`presigned_get` with the exact ObjectStorage signatures. Tests instantiate
+these fakes directly; they must not depend on undeclared pytest fixtures.
+
+Add separate RED cases before implementation for:
+
+- `application/pdf` with a non-PDF signature;
+- successful upload creating one object, one document/version/task, one
+  `document.uploaded` outbox event, and one commit;
+- a persistence failure rolling back and deleting only the generated object;
+- `hash_stream` processing a stream larger than 1 MiB and restoring its original
+  position;
+- the MinIO adapter creating a missing bucket without installing an anonymous
+  bucket policy, and forwarding put/get/delete/presign calls to the configured
+  private bucket.
 
 - [ ] **Step 3: Run tests and verify the missing service failure**
 
@@ -1067,11 +1324,11 @@ class ObjectStorage(Protocol):
     def presigned_get(self, *, key: str, expires: timedelta) -> str: ...
 ~~~
 
-Create these command/result types in papers/service.py:
+Create `UploadIds` in papers/domain.py so the repository layer never imports the
+application service module:
 
 ~~~python
 from dataclasses import dataclass
-from typing import BinaryIO
 
 from research_agent.shared.ids import EntityId, new_id
 
@@ -1086,6 +1343,15 @@ class UploadIds:
     @classmethod
     def create(cls) -> "UploadIds":
         return cls(new_id(), new_id(), new_id(), new_id())
+~~~
+
+Create the command/result types in papers/service.py:
+
+~~~python
+from dataclasses import dataclass
+from typing import BinaryIO
+
+from research_agent.shared.ids import EntityId
 
 
 @dataclass(slots=True)
@@ -1102,6 +1368,17 @@ class UploadReceipt:
     task_id: EntityId
     duplicate: bool
 ~~~
+
+Define `DuplicateDocumentError` in papers/domain.py with the duplicate SHA-256
+value and define `PaperPersistenceError` for every other SQL integrity failure.
+These are persistence-neutral signals consumed by PaperService; do not expose
+SQLAlchemy `IntegrityError` outside the SQL repository.
+
+`MinioObjectStorage` accepts an injected `Minio` client and bucket name, plus a
+`from_settings(Settings)` constructor. Before the first write it idempotently
+creates a missing bucket. A newly created MinIO bucket is private by default;
+the adapter must never install an anonymous bucket policy. `get()` returns a
+binary stream whose `close()` also releases the MinIO HTTP response connection.
 
 - [ ] **Step 5: Implement upload validation, hashing, cleanup, and outbox creation**
 
@@ -1128,7 +1405,21 @@ async def add_outbox_event(
     event_type: str,
     payload: dict[str, object],
 ) -> None: ...
+
+async def rollback(self) -> None: ...
 ~~~
+
+Define a runtime-checkable `UploadPaperRepository` Protocol containing
+`find_by_sha256`, `create_upload`, `add_outbox_event`, `commit`, and `rollback`.
+`PaperService` depends only on this narrow protocol. `SqlPaperRepository`
+implements it with an explicit Pyright conformance witness; its existing
+`PaperRepository` conformance remains intact. `create_upload` inserts the document,
+version, and initial `QUEUED` task using the caller-provided IDs and flushes in
+the same unit of work. It catches only the PostgreSQL constraint
+`uq_document_sha256_active` and raises `DuplicateDocumentError(sha256)`; every
+other `IntegrityError` is wrapped as `PaperPersistenceError` without SQL or
+driver details. `add_outbox_event`
+adds the event with `attempts=0`, `available_at=now()` and `sent_at=None`.
 
 PaperService.upload_pdf must execute in this order:
 
@@ -1136,10 +1427,8 @@ PaperService.upload_pdf must execute in this order:
 async def upload_pdf(self, command: UploadPaperCommand) -> UploadReceipt:
     if command.content_type != "application/pdf":
         raise AppError(code="INVALID_PDF", message="Only PDF files are supported")
-    if command.stream.read(5) != b"%PDF-":
-        raise AppError(code="INVALID_PDF", message="File signature is not PDF")
     command.stream.seek(0)
-    sha256 = hash_stream(command.stream)
+    sha256 = await asyncio.to_thread(validate_and_hash_pdf, command.stream)
     command.stream.seek(0)
     existing = await self._papers.find_by_sha256(sha256)
     if existing is not None:
@@ -1151,7 +1440,12 @@ async def upload_pdf(self, command: UploadPaperCommand) -> UploadReceipt:
         )
     ids = UploadIds.create()
     key = "papers/" + str(ids.document_id) + "/source/" + str(ids.version_id) + ".pdf"
-    self._storage.put(key=key, stream=command.stream, content_type="application/pdf")
+    await asyncio.to_thread(
+        self._storage.put,
+        key=key,
+        stream=command.stream,
+        content_type="application/pdf",
+    )
     try:
         await self._papers.create_upload(
             ids=ids,
@@ -1169,8 +1463,33 @@ async def upload_pdf(self, command: UploadPaperCommand) -> UploadReceipt:
             payload={"version_id": str(ids.version_id), "task_id": str(ids.task_id)},
         )
         await self._papers.commit()
+    except DuplicateDocumentError:
+        await self._papers.rollback()
+        await asyncio.to_thread(self._storage.delete, key=key)
+        existing = await self._papers.find_by_sha256(sha256)
+        if existing is None:
+            raise AppError(
+                code="DUPLICATE_DOCUMENT_UNAVAILABLE",
+                message="The duplicate document could not be reloaded",
+                retryable=True,
+            )
+        return UploadReceipt(
+            document_id=existing.id,
+            version_id=existing.current_version_id,
+            task_id=existing.latest_task_id,
+            duplicate=True,
+        )
+    except PaperPersistenceError as error:
+        await self._papers.rollback()
+        await asyncio.to_thread(self._storage.delete, key=key)
+        raise AppError(
+            code="PERSISTENCE_ERROR",
+            message="The upload could not be persisted",
+            retryable=True,
+        ) from error
     except Exception:
-        self._storage.delete(key=key)
+        await self._papers.rollback()
+        await asyncio.to_thread(self._storage.delete, key=key)
         raise
     return UploadReceipt(
         document_id=ids.document_id,
@@ -1180,9 +1499,13 @@ async def upload_pdf(self, command: UploadPaperCommand) -> UploadReceipt:
     )
 ~~~
 
-The helper hash_stream reads in 1 MiB blocks and restores the original stream position.
+`validate_and_hash_pdf` seeks to offset zero, validates `%PDF-`, reads SHA-256 in
+1 MiB blocks, and restores the original stream position in `finally`, including
+when validation or reading raises. The complete validation/hash operation and
+all synchronous MinIO operations run through `asyncio.to_thread`; no upload
+stream or MinIO operation may block the event loop.
 
-If two equal PDFs pass the initial hash lookup concurrently, the unique active-sha256 constraint is authoritative: roll back the losing transaction, delete its generated MinIO object, reload the winning DocumentRecord in a fresh transaction, and return it with duplicate=True. Never expose the database IntegrityError to the caller.
+If two equal PDFs pass the initial hash lookup concurrently, the unique active-sha256 constraint is authoritative: roll back the losing transaction, delete its generated MinIO object, reload the winning DocumentRecord in the new transaction implicitly opened by the next repository query, and return it with duplicate=True. Never expose SQLAlchemy `IntegrityError` to PaperService, the route, or the caller. A two-session integration test must force both initial lookups to observe no existing document, then verify one first-upload receipt, one duplicate receipt with the winner's IDs, one durable document/version/task/outbox set, and deletion of the one generated key that differs from the durable winner key. The winner key must remain stored.
 
 - [ ] **Step 6: Add the upload route and error mapping**
 
@@ -1206,21 +1529,61 @@ async def upload_document(
 
 Map AppError to application/problem+json with code, message, retryable, trace_id, and details.
 
+Define explicit dependencies in papers/routes.py:
+
+- `get_db_session()` yields and closes one `AsyncSession` from
+  `async_session_factory`;
+- `get_object_storage()` builds a cached `MinioObjectStorage` from `Settings`;
+- `get_paper_service()` combines a request session and object storage;
+- tests override the database and object-storage dependencies, never production
+  globals.
+
+In main.py, install one lightweight HTTP middleware that accepts a non-empty
+`X-Trace-ID` header or generates `str(new_id())`, stores it at
+`request.state.trace_id`, and returns the same header. Register the papers router
+under `/api/v1`. Register an `AppError` exception handler returning status 400
+for `INVALID_PDF`, 503 for retryable errors, and 500 otherwise. Its
+`application/problem+json` body contains `type`, `title`, `status`, `code`,
+`message`, `retryable`, `trace_id`, and `details`.
+
+API integration tests use the migrated pgvector Testcontainer and an in-memory
+ObjectStorage override. They verify invalid MIME/signature responses, a valid
+202 response, durable document/version/task/outbox rows, duplicate IDs, no
+second object write, and matching response/body trace IDs.
+
 - [ ] **Step 7: Run unit and API integration tests**
 
 ~~~powershell
 Set-Location backend
-uv run pytest tests/unit/papers/test_upload_service.py tests/integration/papers/test_upload_api.py -v
+uv run pytest tests/unit/papers/test_upload_service.py tests/unit/papers/test_storage.py -v
+uv run pytest tests/integration/papers/test_upload_api.py tests/integration/papers/test_upload_race.py -v -m integration
+uv run pytest -q -p no:cacheprovider
 uv run ruff check src tests
 uv run pyright
+uv lock --check
 ~~~
 
 Expected: invalid files return 400, valid files return 202, duplicates return the original IDs, and only valid first uploads create MinIO objects.
 
+Run the real adapter smoke against Compose MinIO from the repository root. Use
+`MINIO_ENDPOINT=127.0.0.1:9000` only for this host-side command:
+
+~~~powershell
+docker compose -f infra/compose.yaml up -d minio
+Set-Location backend
+$env:MINIO_ENDPOINT = "127.0.0.1:9000"
+uv run pytest tests/integration/papers/test_minio_smoke.py -v -m integration
+Remove-Item Env:MINIO_ENDPOINT
+~~~
+
+The smoke test creates a unique object key, verifies authenticated put/get and a
+presigned URL, verifies anonymous bucket listing is denied, then deletes only
+its object. It never removes the shared bucket or unrelated objects.
+
 - [ ] **Step 8: Prepare the user commit checkpoint**
 
 ~~~powershell
-git add backend/pyproject.toml backend/uv.lock backend/src/research_agent/papers backend/src/research_agent/main.py backend/tests/unit/papers backend/tests/integration/papers
+git add backend/pyproject.toml backend/uv.lock backend/src/research_agent/papers backend/src/research_agent/main.py backend/tests/unit/papers backend/tests/integration/conftest.py backend/tests/integration/papers docs/superpowers/plans/2026-07-14-research-agent-mvp-implementation.md docs/superpowers/plans/2026-07-14-research-agent-mvp-implementation.zh-CN.md
 git commit -m "feat: upload and deduplicate PDF papers"
 ~~~
 
@@ -1305,6 +1668,8 @@ celery_app = create_celery_app(get_settings().redis_url)
 
 Import get_settings from research_agent.config. When Task 15 adds note generation, extend imports with research_agent.notes.celery_tasks.
 
+Task 5 deliberately precedes the real ingestion orchestration completed in Task 7. Until Task 7 replaces it, register `process_document` as a safety bridge that calls `self.retry(countdown=60)` with task-level `max_retries=None`; it must never report successful processing or acknowledge-and-drop a paper job. Add a focused unit test proving the bridge raises Celery `Retry` and retains the same `version_id` in the retry path. This temporary bridge performs no PDF work and is removed when Task 7 installs the real pipeline entry point.
+
 - [ ] **Step 5: Implement the transactional outbox relay**
 
 OutboxRelay.run_once must:
@@ -1330,6 +1695,8 @@ async def run_once(self, limit: int = 20) -> int:
 ~~~
 
 Start a lightweight relay loop in FastAPI lifespan. It sleeps one second between runs and stops cleanly on shutdown. It performs no PDF work in the API process.
+
+The SQLAlchemy outbox repository must select due unsent rows with `FOR UPDATE SKIP LOCKED`, increment `attempts` after a broker send failure, and set `sent_at` only after `send_task` returns. Each lifespan pass owns a fresh async session/transaction; an unexpected pass failure is rolled back and logged without permanently killing the relay loop. Domain-facing relay interfaces expose project records and protocols rather than SQLAlchemy or Celery framework types.
 
 - [ ] **Step 6: Add worker service**
 
@@ -1382,10 +1749,17 @@ git commit -m "feat: dispatch durable paper jobs"
 
 **Files:**
 - Modify: backend/pyproject.toml
+- Modify: backend/uv.lock
+- Modify: backend/src/research_agent/papers/domain.py
+- Modify: backend/src/research_agent/papers/models.py
+- Modify: backend/src/research_agent/papers/repository.py
+- Modify: backend/src/research_agent/tasks/repository.py
 - Create: backend/src/research_agent/ingestion/contracts.py
 - Create: backend/src/research_agent/ingestion/docling_parser.py
 - Create: backend/src/research_agent/ingestion/pipeline.py
+- Create: backend/migrations/versions/0002_parse_artifacts.py
 - Create: backend/tests/helpers/pdf_factory.py
+- Create: backend/tests/unit/ingestion/test_dependency_lock.py
 - Create: backend/tests/unit/ingestion/test_pipeline.py
 - Create: backend/tests/integration/ingestion/test_docling_parser.py
 
@@ -1509,6 +1883,7 @@ class ParsedDocument:
     elements: list[ParsedElement]
     images: list[ParsedImage]
     page_count: int
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1517,6 +1892,9 @@ class ParseQualityReport:
     parsed_pages: int
     body_characters: int
     empty_pages: tuple[int, ...]
+    section_count: int
+    table_count: int
+    image_count: int
     warnings: tuple[str, ...]
 ~~~
 
@@ -1538,6 +1916,7 @@ DoclingDocumentParser must configure:
 pipeline_options = PdfPipelineOptions()
 pipeline_options.do_ocr = False
 pipeline_options.do_table_structure = True
+pipeline_options.generate_picture_images = True
 converter = DocumentConverter(
     allowed_formats=[InputFormat.PDF],
     format_options={
@@ -1546,7 +1925,7 @@ converter = DocumentConverter(
 )
 ~~~
 
-Normalize Docling text, table, picture, section path, page number, bounding box, Markdown, and JSON into the contracts above. No Docling class leaves this adapter.
+Normalize Docling text, table, picture, section path, page number, top-left-origin bounding box, Markdown, and lossless JSON into the contracts above. Use Docling `self_ref` values as stable element/image IDs where available; use `page_number=0` as the explicit unknown-provenance sentinel instead of inventing a positive page number, and add a warning to `ParsedDocument.warnings` for every normalized content item that lacks page provenance. No Docling class leaves this adapter. Picture extraction must emit deterministic PNG bytes and content type `image/png`.
 
 - [ ] **Step 6: Implement artifact keys and quality rules**
 
@@ -1559,6 +1938,18 @@ IngestionPipeline.parse must:
 5. Calculate ParseQualityReport.
 6. Persist artifact metadata.
 7. Mark NEEDS_REVIEW when parsed pages are below 95% or body text is below 100 characters per parsed page.
+
+Use the design-specified deterministic keys:
+
+~~~text
+papers/{document_id}/parsed/{version_id}/document.json
+papers/{document_id}/parsed/{version_id}/document.md
+papers/{document_id}/images/{version_id}/{image_id}.png
+~~~
+
+Migration `0002_parse_artifacts` extends `document_version` with nullable `parsed_json_object_key`, `parsed_markdown_object_key`, `image_object_keys` JSONB, and `parse_quality` JSONB columns so pre-existing unparsed rows remain valid. PostgreSQL stores the durable object-key manifest and quality report; MinIO stores the large artifact bytes. Extend the project repository interfaces with the narrow operations required to load a version, persist this manifest plus parser/status metadata, and load the current task by `document_version_id`. Do not expose SQLAlchemy, Docling, MinIO, or Celery types through those interfaces.
+
+All synchronous object-storage and Docling operations run through `asyncio.to_thread`. Close the downloaded MinIO stream, always remove the temporary directory, and use deterministic object keys so a retry overwrites the same artifacts instead of creating duplicates. Persist the manifest only after every artifact upload succeeds. On parser/storage failure, roll back partial database state and durably mark the task, version, and document `FAILED` without leaking credentials or full paper text in the error. When the quality rule triggers, persist document/version `NEEDS_REVIEW` and terminate the current task as non-retryable `FAILED` with error code `PARSE_QUALITY_REVIEW`; otherwise leave the version/document processing state ready for Task 7 to continue and keep the task at `PARSING/RUNNING`.
 
 Use this deterministic rule:
 
@@ -1577,12 +1968,12 @@ uv run pytest tests/unit/ingestion/test_pipeline.py -v
 uv run pytest tests/integration/ingestion/test_docling_parser.py -v -m integration
 ~~~
 
-Expected: normalized unit test passes; generated two-page PDF produces two parsed pages, Markdown containing both page texts, and non-empty provenance.
+Expected: normalized unit tests cover deterministic keys, manifest persistence, quality thresholds, idempotent overwrite, stream/temp cleanup, and durable failure state; generated two-page PDF produces two parsed pages, Markdown containing both page texts, lossless JSON, and non-empty page/bounding-box provenance. The real Docling test must run with OCR disabled and must not require a real provider key.
 
 - [ ] **Step 8: Prepare the user commit checkpoint**
 
 ~~~powershell
-git add backend/pyproject.toml backend/uv.lock backend/src/research_agent/ingestion backend/tests/helpers/pdf_factory.py backend/tests/unit/ingestion backend/tests/integration/ingestion
+git add backend/pyproject.toml backend/uv.lock backend/src/research_agent/ingestion backend/src/research_agent/papers backend/src/research_agent/tasks/repository.py backend/migrations/versions/0002_parse_artifacts.py backend/tests/helpers/pdf_factory.py backend/tests/unit/ingestion backend/tests/integration/ingestion
 git commit -m "feat: parse PDFs into versioned artifacts"
 ~~~
 
@@ -1595,9 +1986,13 @@ git commit -m "feat: parse PDFs into versioned artifacts"
 - Modify: backend/src/research_agent/ingestion/pipeline.py
 - Modify: backend/src/research_agent/ingestion/celery_tasks.py
 - Create: backend/src/research_agent/ingestion/models.py
-- Create: backend/migrations/versions/0002_chunks.py
+- Modify: backend/src/research_agent/papers/repository.py
+- Modify: backend/src/research_agent/shared/errors.py
+- Modify: backend/migrations/env.py
+- Create: backend/migrations/versions/0003_chunks.py
 - Create: backend/tests/unit/ingestion/test_chunker.py
 - Create: backend/tests/integration/ingestion/test_pipeline_ready.py
+- Modify: backend/tests/unit/tasks/test_celery_config.py
 
 **Interfaces:**
 - Consumes: ParsedElement, ParsedDocument, PaperRepository, TaskRepository
@@ -1700,9 +2095,17 @@ StructuralChunker must:
 - keep tables and figure captions with their section path;
 - mark bibliography chunks as content_type reference.
 
+Validate `target_tokens > 0`, `overlap_tokens >= 0`, and
+`overlap_tokens < target_tokens`. Whitespace-only elements are ignored. A
+single oversized table or element remains atomic. `reference` overrides the
+other content types; otherwise table-only chunks use `table`, picture-only
+chunks use `figure`, and mixed/ordinary chunks use `text`. Bibliography labels
+are matched case-insensitively for `References`/`Bibliography` and explicitly
+for `参考文献`.
+
 - [ ] **Step 4: Add chunk persistence**
 
-Migration 0002 creates:
+Migration 0003 creates:
 
 ~~~sql
 CREATE TABLE document_chunk (
@@ -1732,6 +2135,14 @@ CREATE INDEX ix_chunk_search_zh ON document_chunk USING gin (search_vector_zh);
 
 Use application-side Chinese tokenization to populate lexical_text; English text remains unchanged.
 
+`DocumentChunkModel` must be imported by `migrations/env.py` so Alembic
+autogenerate and schema-drift checks see the table. Chunk persistence uses one
+transactional PostgreSQL upsert keyed by
+`(document_version_id, chunk_index, pipeline_version)`, preserves existing row
+IDs on retries, and deletes stale indexes for the same version/pipeline. The
+repository translates SQLAlchemy failures into the existing sanitized project
+error boundary.
+
 - [ ] **Step 5: Complete process_document orchestration**
 
 The Celery entry point must only open dependencies and call the application pipeline:
@@ -1746,10 +2157,27 @@ The Celery entry point must only open dependencies and call the application pipe
     max_retries=5,
 )
 def process_document(self, version_id: str) -> None:
-    run_async(build_ingestion_pipeline().run(UUID(version_id)))
+    run_async(run_ingestion_job(UUID(version_id)))
 ~~~
 
 Pipeline.run transitions through VALIDATING, PARSING, NORMALIZING, CHUNKING, then stops at EMBEDDING until Task 9 supplies the embedding stage.
+
+`run_ingestion_job` creates a fresh async engine and shared session for each
+Celery invocation, builds the parser/storage/paper/task/chunk dependencies on
+that session, and disposes the engine in `finally`; it must not reuse the API's
+global async engine across repeated `asyncio.run` loops. Retryable project
+errors are mapped to `TransientInfrastructureError`; invalid UUIDs and
+non-retryable quality/application errors are not autoretried.
+
+The durable stage sequence uses `RUNNING` with progress values 1 through 5 for
+`VALIDATING`, `PARSING`, `NORMALIZING`, `CHUNKING`, and `EMBEDDING`. After
+chunk persistence, document/version remain `PROCESSING` and the task remains
+`EMBEDDING/RUNNING`; only Task 9 may set `READY` and switch
+`document.current_version_id`. A `NEEDS_REVIEW` parse stops before chunking.
+Chunking/persistence failures roll back partial writes and durably mark the
+document, version, and task `FAILED` at the correct stage with sanitized error
+codes/messages. Re-entering a version already at `EMBEDDING` or later is a
+no-op until Task 9 exists.
 
 - [ ] **Step 6: Verify retries do not duplicate chunks**
 
@@ -1759,12 +2187,14 @@ uv run alembic upgrade head
 uv run pytest tests/unit/ingestion/test_chunker.py tests/integration/ingestion/test_pipeline_ready.py -v
 ~~~
 
-Expected: running the same version twice produces the same chunk count and unique chunk indexes, without duplicate rows.
+Expected: running the same version twice produces the same chunk count, row
+IDs, and unique chunk indexes without duplicate rows; the task ends at
+`EMBEDDING/RUNNING`, not `READY`.
 
 - [ ] **Step 7: Prepare the user commit checkpoint**
 
 ~~~powershell
-git add backend/src/research_agent/ingestion backend/migrations/versions/0002_chunks.py backend/tests/unit/ingestion backend/tests/integration/ingestion
+git add backend/src/research_agent/ingestion backend/migrations/versions/0003_chunks.py backend/tests/unit/ingestion backend/tests/integration/ingestion
 git commit -m "feat: create structure-aware paper chunks"
 ~~~
 
@@ -1780,8 +2210,25 @@ git commit -m "feat: create structure-aware paper chunks"
 - Create: frontend/src/features/papers/task-progress.tsx
 - Create: frontend/src/app/papers/page.tsx
 - Modify: backend/src/research_agent/papers/routes.py
+- Modify: backend/src/research_agent/papers/domain.py
+- Modify: backend/src/research_agent/papers/repository.py
+- Create: backend/src/research_agent/tasks/routes.py
+- Create: backend/src/research_agent/tasks/service.py
+- Modify: backend/src/research_agent/tasks/repository.py
+- Modify: backend/src/research_agent/main.py
+- Modify: backend/src/research_agent/config.py
+- Modify: backend/Dockerfile
+- Modify: infra/compose.yaml
+- Modify: .env.example
 - Create: frontend/src/features/papers/upload-panel.test.tsx
+- Create: frontend/src/features/papers/task-progress.test.tsx
+- Create: backend/tests/contract/test_paper_task_api.py
+- Create: frontend/vitest.config.mts
+- Create: frontend/vitest.setup.ts
+- Create: frontend/playwright.config.ts
 - Create: frontend/e2e/paper-upload.spec.ts
+- Modify: frontend/package.json
+- Modify: frontend/pnpm-lock.yaml
 
 **Interfaces:**
 - Consumes: POST /api/v1/documents, GET /api/v1/documents, GET /api/v1/tasks/{task_id}
@@ -1847,6 +2294,14 @@ export type TaskState = {
 
 api.ts must throw a typed ApiProblem for non-2xx responses and must never expose backend secrets.
 
+Use the direct browser-to-FastAPI approach already implied by
+`NEXT_PUBLIC_API_URL`. Add strict configured CORS for the web origin; do not add
+a Next.js BFF, server actions, database access, MinIO access, or credentials to
+the browser bundle. The API client maps the existing snake_case HTTP schema to
+camelCase frontend types and parses only the documented problem fields. A
+malformed/non-JSON error response becomes a generic status-based `ApiProblem`;
+raw response bodies are never surfaced.
+
 - [ ] **Step 4: Implement upload and progress components**
 
 UploadPanel requirements:
@@ -1858,6 +2313,13 @@ UploadPanel requirements:
 - start TaskProgress after a 202 response.
 
 TaskProgress polls PostgreSQL-backed GET /tasks/{id} every two seconds and stops on READY, FAILED, or CANCELLED. It displays stage, fraction, retry action, and persistent error message. Redis progress caching is not required.
+
+The papers page rehydrates from `GET /documents` on mount, keys progress cards
+by `taskId`, and therefore restores durable progress after browser or service
+restart. A duplicate upload may update the existing card and notice but must
+not append another card. The responsive MVP layout is a semantic Chinese paper
+library: upload/status summary first, document/progress list second; no design
+system, animation framework, or unrelated navigation shell is introduced.
 
 - [ ] **Step 5: Add backend list and task endpoints**
 
@@ -1871,6 +2333,33 @@ POST /api/v1/tasks/{task_id}/retry
 ~~~
 
 Retry is allowed only for FAILED tasks with retryable error codes and creates a new outbox event without resetting durable history.
+
+Use stable descending keyset pagination over `(created_at, id)`. The opaque
+cursor is URL-safe base64 JSON containing only those values; malformed cursors
+return a sanitized `INVALID_CURSOR` problem. `limit` defaults to 50 and is
+bounded to 1..100. List active documents only and return `items` plus
+`next_cursor`; document detail includes the current version and latest task ID.
+
+Task responses include the documented state plus `document_version_id`,
+`retry_count`, and a server-computed `retryable` boolean. The current Task 4-7
+retryable codes are `VALIDATION_FAILED`, `NORMALIZATION_FAILED`,
+`CHUNK_PERSISTENCE_FAILED`, `PARSE_DOWNLOAD_FAILED`, `PARSE_PARSER_FAILED`,
+`PARSE_UPLOAD_FAILED`, `PARSE_PERSISTENCE_FAILED`,
+`PARSE_FAILURE_RECOVERY_FAILED`, and `INGESTION_FAILURE_RECOVERY_FAILED`.
+
+Retry locks the task row, rechecks `FAILED` and the allow-list, increments
+`retry_count`, changes only status to `QUEUED`, retains stage/progress/error
+details until the worker starts, and inserts one
+`document.retry_requested` outbox event in the same transaction. This preserves
+the task identity and durable failure context while making a resumed poll
+possible. Concurrent retry requests yield one accepted retry and one conflict,
+never duplicate dispatch. Missing resources map to 404, invalid cursors to 400,
+and invalid state/permanent failures to 409 problem responses.
+
+Register document and task routers under `/api/v1`. The backend image must copy
+Alembic configuration/migrations, and Compose must run `alembic upgrade head`
+as a one-shot dependency before API/worker startup. Redis remains internal to
+Compose rather than publishing the conflict-prone host port 6379.
 
 - [ ] **Step 6: Run frontend and API contract tests**
 
@@ -1893,6 +2382,12 @@ pnpm --dir frontend exec playwright test e2e/paper-upload.spec.ts
 ~~~
 
 Expected: upload returns a task ID, progress survives a browser refresh, and a deliberately invalid PDF shows a durable failure.
+
+For Task 8, a valid document may legitimately remain `EMBEDDING/RUNNING`
+because Task 9 owns embeddings and the READY transition. The E2E test must not
+wait for READY. Use a file with PDF MIME and `%PDF-` magic but malformed PDF
+content to exercise a worker-produced durable failure; a plain non-PDF remains
+a client-side/400 validation case and does not create durable state.
 
 - [ ] **Step 8: Ingestion UI durability review**
 
@@ -1921,7 +2416,7 @@ git commit -m "feat: show paper upload and processing progress"
 - Modify: backend/src/research_agent/config.py
 - Create: backend/src/research_agent/providers/openai_embeddings.py
 - Create: backend/src/research_agent/retrieval/models.py
-- Create: backend/migrations/versions/0003_embeddings.py
+- Create: backend/migrations/versions/0004_embeddings.py
 - Modify: backend/src/research_agent/ingestion/pipeline.py
 - Create: backend/tests/unit/providers/test_openai_embeddings.py
 - Create: backend/tests/integration/ingestion/test_embedding_stage.py
@@ -2017,7 +2512,7 @@ class OpenAICompatibleEmbeddingProvider:
 
 - [ ] **Step 5: Create embedding tables and HNSW index**
 
-Migration 0003:
+Migration 0004:
 
 ~~~sql
 CREATE TABLE embedding_space (
@@ -2079,7 +2574,7 @@ Expected: a valid test PDF progresses from QUEUED to READY, its Markdown and JSO
 - [ ] **Step 9: Prepare the user commit checkpoint**
 
 ~~~powershell
-git add backend/pyproject.toml backend/uv.lock backend/src/research_agent/config.py backend/src/research_agent/providers/openai_embeddings.py backend/src/research_agent/retrieval backend/src/research_agent/ingestion/pipeline.py backend/migrations/versions/0003_embeddings.py backend/tests
+git add backend/pyproject.toml backend/uv.lock backend/src/research_agent/config.py backend/src/research_agent/providers/openai_embeddings.py backend/src/research_agent/retrieval backend/src/research_agent/ingestion/pipeline.py backend/migrations/versions/0004_embeddings.py backend/tests
 git commit -m "feat: embed and activate paper versions"
 ~~~
 
@@ -2384,7 +2879,7 @@ git commit -m "feat: fuse rerank and evaluate retrieval"
 - Create: backend/src/research_agent/chat/repository.py
 - Create: backend/src/research_agent/chat/graph.py
 - Create: backend/src/research_agent/chat/service.py
-- Create: backend/migrations/versions/0004_chat.py
+- Create: backend/migrations/versions/0005_chat.py
 - Create: backend/tests/unit/chat/test_graph.py
 - Create: backend/tests/integration/chat/test_chat_persistence.py
 
@@ -2434,7 +2929,7 @@ Expected: FAIL because chat.domain and chat.graph do not exist.
 
 - [ ] **Step 4: Create chat persistence**
 
-Migration 0004 creates:
+Migration 0005 creates:
 
 ~~~sql
 CREATE TABLE chat_session (
@@ -2528,7 +3023,7 @@ Expected: insufficient evidence routes to clarification; a successful run surviv
 - [ ] **Step 9: Prepare the user commit checkpoint**
 
 ~~~powershell
-git add backend/pyproject.toml backend/uv.lock backend/src/research_agent/chat backend/migrations/versions/0004_chat.py backend/tests/unit/chat backend/tests/integration/chat
+git add backend/pyproject.toml backend/uv.lock backend/src/research_agent/chat backend/migrations/versions/0005_chat.py backend/tests/unit/chat backend/tests/integration/chat
 git commit -m "feat: orchestrate persistent paper chat"
 ~~~
 
@@ -2822,7 +3317,7 @@ git commit -m "feat: stream verified cited paper answers"
 - Create: backend/src/research_agent/notes/service.py
 - Create: backend/src/research_agent/notes/celery_tasks.py
 - Create: backend/src/research_agent/notes/routes.py
-- Create: backend/migrations/versions/0005_notes.py
+- Create: backend/migrations/versions/0006_notes.py
 - Create: backend/tests/unit/notes/test_note_generation.py
 - Create: backend/tests/integration/notes/test_note_revisions.py
 - Create: frontend/src/features/notes/note-editor.tsx
@@ -2878,7 +3373,7 @@ Expected: FAIL because notes.domain and notes.service do not exist.
 
 - [ ] **Step 3: Create note persistence**
 
-Migration 0005:
+Migration 0006:
 
 ~~~sql
 CREATE TABLE paper_note (
@@ -2973,7 +3468,7 @@ Generate notes for three different papers, edit each, restart services, and conf
 - [ ] **Step 9: Prepare the user commit checkpoint**
 
 ~~~powershell
-git add backend/src/research_agent/notes backend/migrations/versions/0005_notes.py backend/tests frontend/src/features/notes frontend/src/app/papers
+git add backend/src/research_agent/notes backend/migrations/versions/0006_notes.py backend/tests frontend/src/features/notes frontend/src/app/papers
 git commit -m "feat: generate optional versioned paper notes"
 ~~~
 
@@ -2987,7 +3482,7 @@ git commit -m "feat: generate optional versioned paper notes"
 - Create: backend/src/research_agent/shared/observability.py
 - Create: backend/src/research_agent/evaluation/answer_eval.py
 - Modify: backend/src/research_agent/evaluation/cli.py
-- Create: backend/migrations/versions/0006_usage_evaluation.py
+- Create: backend/migrations/versions/0007_usage_evaluation.py
 - Create: backend/tests/unit/evaluation/test_answer_metrics.py
 - Create: backend/tests/integration/evaluation/test_run_persistence.py
 - Create: evaluation/README.md
@@ -3034,7 +3529,7 @@ Expected: FAIL because evaluation.answer_eval does not exist.
 
 - [ ] **Step 4: Add durable usage and evaluation schema**
 
-Migration 0006 creates:
+Migration 0007 creates:
 
 ~~~sql
 CREATE TABLE model_usage (
@@ -3126,7 +3621,7 @@ Expected: evaluation run is reproducible from stored configuration; logs contain
 - [ ] **Step 8: Prepare the user commit checkpoint**
 
 ~~~powershell
-git add backend/pyproject.toml backend/uv.lock backend/src/research_agent/shared backend/src/research_agent/evaluation backend/migrations/versions/0006_usage_evaluation.py backend/tests evaluation/README.md evaluation/datasets/synthetic_mvp.jsonl
+git add backend/pyproject.toml backend/uv.lock backend/src/research_agent/shared backend/src/research_agent/evaluation backend/migrations/versions/0007_usage_evaluation.py backend/tests evaluation/README.md evaluation/datasets/synthetic_mvp.jsonl
 git commit -m "feat: trace and evaluate RAG quality"
 ~~~
 
@@ -3198,8 +3693,8 @@ New-Item -ItemType Directory -Force -Path $resolved | Out-Null
 docker compose -f infra/compose.yaml exec -T postgres pg_dump -U research -Fc -f /tmp/research.dump research
 docker compose -f infra/compose.yaml cp postgres:/tmp/research.dump (Join-Path $resolved "research.dump")
 docker compose -f infra/compose.yaml exec -T postgres rm -f /tmp/research.dump
-$counts = docker compose -f infra/compose.yaml exec -T postgres psql -U research -d research -At -c "SELECT concat_ws(',', (SELECT count(*) FROM document), (SELECT count(*) FROM document_version), (SELECT count(*) FROM document_chunk), (SELECT count(*) FROM chat_session), (SELECT count(*) FROM message), (SELECT count(*) FROM citation), (SELECT count(*) FROM paper_note), (SELECT count(*) FROM note_revision));"
-Set-Content -LiteralPath (Join-Path $resolved "counts.csv") -Value "documents,versions,chunks,chats,messages,citations,notes,revisions`n$counts" -Encoding utf8
+$counts = docker compose -f infra/compose.yaml exec -T postgres psql -U research -d research -At -c "SELECT concat_ws(',', (SELECT count(*) FROM document), (SELECT count(*) FROM document_version), (SELECT count(*) FROM document_chunk), (SELECT count(*) FROM chat_session), (SELECT count(*) FROM chat_message), (SELECT count(*) FROM chat_run), (SELECT count(*) FROM paper_note), (SELECT count(*) FROM note_revision));"
+Set-Content -LiteralPath (Join-Path $resolved "counts.csv") -Value "documents,versions,chunks,chats,messages,runs,notes,revisions`n$counts" -Encoding utf8
 docker run --rm --entrypoint /bin/sh --mount "type=bind,source=$resolved,target=/backup" minio/mc -c 'mc alias set local http://host.docker.internal:9000 "$1" "$2" >/dev/null && mc mirror --overwrite local/research-agent /backup/minio' -- $MinioUser $MinioPassword
 Copy-Item -LiteralPath ".env" -Destination (Join-Path $resolved "env.backup") -ErrorAction Stop
 ~~~
@@ -3229,7 +3724,7 @@ docker run --rm --entrypoint /bin/sh --mount "type=bind,source=$resolved,target=
 Push-Location backend
 uv run alembic upgrade head
 Pop-Location
-$counts = docker compose -f infra/compose.yaml exec -T postgres psql -U research -d research -At -c "SELECT concat_ws(',', (SELECT count(*) FROM document), (SELECT count(*) FROM document_version), (SELECT count(*) FROM document_chunk), (SELECT count(*) FROM chat_session), (SELECT count(*) FROM message), (SELECT count(*) FROM citation), (SELECT count(*) FROM paper_note), (SELECT count(*) FROM note_revision));"
+$counts = docker compose -f infra/compose.yaml exec -T postgres psql -U research -d research -At -c "SELECT concat_ws(',', (SELECT count(*) FROM document), (SELECT count(*) FROM document_version), (SELECT count(*) FROM document_chunk), (SELECT count(*) FROM chat_session), (SELECT count(*) FROM chat_message), (SELECT count(*) FROM chat_run), (SELECT count(*) FROM paper_note), (SELECT count(*) FROM note_revision));"
 if (-not (Select-String -LiteralPath (Join-Path $resolved "counts.csv") -SimpleMatch $counts)) { throw "Restored counts do not match backup manifest" }
 docker compose -f infra/compose.yaml up -d api worker
 ~~~
@@ -3378,4 +3873,4 @@ Do not start any of these while the MVP release command fails.
 
 ## Execution Handoff
 
-Plan execution must begin from Task 1 and stop at every checkpoint for review. Because the user retains commit control, agentic workers show the suggested Git commands but do not execute git commit without explicit authorization.
+Plan execution must begin from Task 1 and stop at every checkpoint for review and user acceptance. Starting with Product Task 2, task-scoped staging and `git commit` are covered by the user's standing authorization only after required verification passes and independent task review is clean. `git push`, merge, worktree removal, and other integration or cleanup operations remain separately authorized.

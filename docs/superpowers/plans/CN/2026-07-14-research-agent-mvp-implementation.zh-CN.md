@@ -23,7 +23,7 @@
 - 耗时任务必须幂等，只接收 ID，不在队列中传递 PDF 字节。
 - 默认服务只监听 `127.0.0.1`，MinIO Bucket 必须保持私有。
 - 自动化测试使用 Fake Provider；真实模型测试只能作为显式 Smoke Test 或评测命令执行。
-- 用户保留 Git 提交控制权。执行代理可以准备提交命令，但不得自行执行 `git commit`。
+- 自产品任务 2 起，用户持续授权 Agent 在所需验证全部通过且独立任务审查无阻断问题后，暂存精确的任务范围文件并执行 `git commit`。Agent 必须报告已提交范围、提交消息和验证证据。该持续授权不包含 `git push`、合并、移除工作树或被忽略的 SDD 产物；每项集成或清理操作仍需用户分别明确授权。
 
 ## 二、阶段检查点
 
@@ -83,7 +83,7 @@
 - [ ] 步骤 2：运行测试，确认模块导入失败。
 - [ ] 步骤 3：实现统一 ID 和应用错误类型。
 - [ ] 步骤 4：用 `typing.Protocol` 定义 Provider 接口。
-- [ ] 步骤 5：实现确定性的 Fake LLM、Embedding 和 Reranker。
+- [ ] 步骤 5：实现确定性的 Fake LLM、Embedding 和 Reranker；Fake Embedding 拒绝非正维度，并用带域分隔的 SHA-256 块支持任意正维度。
 - [ ] 步骤 6：运行单元测试和静态检查。
 - [ ] 步骤 7：准备用户提交检查点。
 
@@ -93,39 +93,39 @@
 
 **目标：** 建立论文、版本、任务和 Outbox 的持久数据模型。
 
-**主要文件：** `shared/db.py`、`papers/domain.py`、`papers/models.py`、`papers/repository.py`、`tasks/domain.py`、`tasks/repository.py`、`migrations/versions/0001_papers_tasks.py`。
+**主要文件：** `alembic.ini`、`migrations/env.py`、`migrations/script.py.mako`、`migrations/versions/0001_papers_tasks.py`、`shared/db.py`、`papers/domain.py`、`papers/models.py`、`papers/repository.py`、`tasks/domain.py`、`tasks/repository.py`、`tests/integration/conftest.py` 和仓储集成测试。
 
-**输出接口：** `DocumentStatus`、`VersionStatus`、`TaskStage`、`TaskStatus`、`DocumentRecord`、`PaperRepository`、`TaskRepository`、`async_session_factory`。
+**输出接口：** `DocumentStatus`、`VersionStatus`、`TaskStage`、`TaskStatus`、`DocumentRecord`、`DocumentVersionRecord`、`TaskRecord`、`PaperRepository`、`TaskRepository`、`async_session_factory`。
 
-- [ ] 步骤 1：安装 SQLAlchemy、asyncpg、Alembic、pgvector 和 Testcontainers。
-- [ ] 步骤 2：编写创建论文和版本的失败集成测试。
+- [ ] 步骤 1：安装 SQLAlchemy、asyncpg、Alembic、pgvector 和 `testcontainers[postgres]`，并注册 `integration` 测试标记。
+- [ ] 步骤 2：用 `pgvector/pgvector:pg17` Testcontainer 编写创建论文、版本和初始任务的失败集成测试；夹具执行两次 Alembic `upgrade head` 并为每个测试回滚外层事务。
 - [ ] 步骤 3：运行测试，确认领域模型和仓储尚不存在。
-- [ ] 步骤 4：定义论文与任务状态枚举和记录类型。
-- [ ] 步骤 5：建立 SQLAlchemy Model、`vector` 扩展、唯一索引和 Outbox 索引。
-- [ ] 步骤 6：实现论文与任务仓储方法。
-- [ ] 步骤 7：执行迁移并运行仓储测试。
+- [ ] 步骤 4：定义论文与任务状态枚举，以及 `CreatedDocument`、`DocumentRecord`、`DocumentVersionRecord` 和 `TaskRecord`；创建结果包含非空 `task_id`。
+- [ ] 步骤 5：补齐 Alembic 配置和模板，建立 SQLAlchemy Model、`vector` 扩展、唯一索引和 Outbox 索引。
+- [ ] 步骤 6：定义 `PaperRepository`、`TaskRepository` 协议并实现 SQL 仓储；创建论文时在同一工作单元内创建 `QUEUED` 初始任务。
+- [ ] 步骤 7：通过 `127.0.0.1` 对 Compose PostgreSQL 执行两次迁移和 heads 检查，再用隔离 Testcontainer 运行仓储测试及静态检查。
 - [ ] 步骤 8：准备用户提交检查点。
 
-**关键约束：** 活跃论文的 SHA-256 唯一；同一版本同一任务阶段唯一；当前版本和最近任务必须可以从 `DocumentRecord` 得到。
+**关键约束：** 活跃论文的 SHA-256 唯一；同一版本同一任务阶段唯一；当前版本和按 `(created_at DESC, id DESC)` 确定的最近任务必须可以从 `DocumentRecord` 得到；集成测试不得依赖 Compose 的持久状态。
 
 ### 任务 4：实现私有对象存储和幂等 PDF 上传
 
 **目标：** 校验 PDF、计算哈希、去重、保存原文件，并在同一事务中创建任务和 Outbox 事件。
 
-**主要文件：** `papers/storage.py`、`papers/service.py`、`papers/routes.py`、上传单元测试和 API 集成测试。
+**主要文件：** `papers/domain.py`、`papers/repository.py`、`papers/storage.py`、`papers/service.py`、`papers/routes.py`、`main.py`、上传/存储单元测试和 API/并发集成测试。
 
-**输出接口：** `ObjectStorage`、`MinioObjectStorage`、`UploadPaperCommand`、`UploadReceipt`、`PaperService.upload_pdf`、`POST /api/v1/documents`。
+**输出接口：** `UploadIds`、`DuplicateDocumentError`、`PaperPersistenceError`、`ObjectStorage`、`MinioObjectStorage`、`UploadPaperCommand`、`UploadReceipt`、`PaperService.upload_pdf`、`POST /api/v1/documents`。
 
 - [ ] 步骤 1：安装 MinIO 和 multipart 依赖。
-- [ ] 步骤 2：编写非 PDF 与重复上传失败测试。
+- [ ] 步骤 2：用显式 Fake 编写 MIME、文件头、真实 SHA-256 去重、成功上传、失败清理、流位置恢复和 MinIO 适配器失败测试，不依赖未声明 fixture。
 - [ ] 步骤 3：运行测试，确认上传服务尚不存在。
-- [ ] 步骤 4：定义对象存储、上传 ID、命令和结果接口。
-- [ ] 步骤 5：实现 MIME、文件签名、SHA-256、MinIO 清理、数据库事务和 Outbox 创建。
-- [ ] 步骤 6：添加上传路由和 `application/problem+json` 错误映射。
-- [ ] 步骤 7：运行单元测试与 API 集成测试。
+- [ ] 步骤 4：把 `UploadIds` 和 `DuplicateDocumentError` 放入领域层，定义同步对象存储接口、命令和结果；MinIO 网络调用由异步 service 通过 `asyncio.to_thread` 执行。
+- [ ] 步骤 5：在线程中从偏移零执行 MIME/文件签名和 1 MiB 分块 SHA-256，建立私有 MinIO bucket、失败清理、数据库事务和 Outbox；仓储把 `uq_document_sha256_active` 转换为领域重复错误，把其他完整性错误包装成不泄露 SQL/driver 的 `PaperPersistenceError`，并提供 `rollback()`。
+- [ ] 步骤 6：添加显式数据库/对象存储/service 依赖、上传路由、请求 `trace_id`/`X-Trace-ID` 和 `application/problem+json` 错误映射。
+- [ ] 步骤 7：运行单元测试、API 集成测试和强制双请求先查空的并发去重测试；执行完整后端、Ruff、Pyright、锁文件检查和 Compose MinIO 私有 bucket 烟测。
 - [ ] 步骤 8：准备用户提交检查点。
 
-**关键约束：** 并发上传相同 PDF 时，以数据库唯一约束为准；失败方回滚事务、删除自己的 MinIO 对象并返回已有论文，不向用户暴露 `IntegrityError`。
+**关键约束：** 并发上传相同 PDF 时，以数据库唯一约束为准；失败方回滚事务、删除与持久胜方 key 不同的自己对象并在新事务中返回胜方论文，胜方对象必须保留；不向 service/API 暴露 SQLAlchemy `IntegrityError`；文件名不参与对象键；bucket 不安装匿名策略。大小、页数和扩展名限制仍属于 Task 18。
 
 ### 任务 5：通过 Redis 分发持久 Celery 任务
 
@@ -146,11 +146,15 @@
 
 **验收：** API 进程不执行 PDF 解析；Redis 不保存永久业务状态；Worker 同时监听 `paper_ingestion` 和 `note_generation`。
 
+**Task 5/Task 7 过渡约束：** Task 7 才会完成真实摄取编排。在此之前，`process_document` 必须注册为安全桥接任务：任务级 `max_retries=None`，并调用 `self.retry(countdown=60)`；它不得把尚未处理的论文任务报告为成功或确认后丢弃。聚焦单元测试必须证明该桥接任务抛出 Celery `Retry`，且重试路径保留原 `version_id`。Task 7 安装真实管线入口时移除此桥接逻辑。
+
+**Outbox 并发与生命周期约束：** SQLAlchemy Outbox 仓储只通过 `FOR UPDATE SKIP LOCKED` 领取到期且未发送的事件；Broker 发送失败后递增 `attempts`，仅在 `send_task` 返回后设置 `sent_at`。Lifespan 每轮使用新的异步 session/事务；意外失败必须回滚并记录，但不能永久终止 relay loop；关闭时干净取消。Relay 的领域侧接口只暴露项目记录和 Protocol，不暴露 SQLAlchemy 或 Celery 框架类型。
+
 ### 任务 6：用 Docling 生成带版本的解析产物
 
 **目标：** 将 Docling 隔离在解析适配器内，把 PDF 转换为项目自有的标准元素、Markdown、JSON 和质量报告。
 
-**主要文件：** `ingestion/contracts.py`、`ingestion/docling_parser.py`、`ingestion/pipeline.py`、解析契约与集成测试。
+**主要文件：** `backend/pyproject.toml`、`backend/uv.lock`、`papers/domain.py`、`papers/models.py`、`papers/repository.py`、`tasks/repository.py`、`ingestion/contracts.py`、`ingestion/docling_parser.py`、`ingestion/pipeline.py`、`migrations/versions/0002_parse_artifacts.py`、`tests/unit/ingestion/test_dependency_lock.py`，以及解析、仓储与迁移测试。
 
 **输出接口：** `ParsedElement`、`ParsedDocument`、`ParseQualityReport`、`DocumentParser`、`DoclingDocumentParser`、`IngestionPipeline.parse`。
 
@@ -163,13 +167,17 @@
 - [ ] 步骤 7：运行单元测试和一个真实 Docling 集成测试。
 - [ ] 步骤 8：准备用户提交检查点。
 
+**持久化与失败语义修正：** 新增 `0002_parse_artifacts` 迁移，在 `document_version` 保存可空的 JSON/Markdown 对象 key、图片 key 清单和解析质量 JSON；既有未解析行保持有效。对象 key 固定为 `papers/{document_id}/parsed/{version_id}/document.{json,md}` 与 `papers/{document_id}/images/{version_id}/{image_id}.png`。扩展论文/任务仓储的窄接口，以按版本读取论文版本、持久化 manifest/解析器/状态，以及按 `document_version_id` 获取当前任务；领域接口不得暴露 SQLAlchemy、Docling、MinIO 或 Celery 类型。同步 MinIO/Docling 调用全部通过 `asyncio.to_thread`；关闭下载流并清理临时目录；所有对象上传成功后才提交 manifest。解析/存储异常必须回滚并将任务、版本、论文持久标记为 `FAILED`；低于质量阈值时论文/版本设为 `NEEDS_REVIEW`，当前任务以不可重试 `PARSE_QUALITY_REVIEW` 失败结束；正常解析保持 `PARSING/RUNNING`，供 Task 7 继续。质量报告同时保存章节、表格和图片数量；Docling 图片使用稳定 ID 导出确定性 PNG；缺失页级 provenance 的元素使用 `page_number=0` 明确表示未知，并记录 warning，不能伪造正页码。
+
+**迁移顺延：** 因 Task 6 新增 `0002_parse_artifacts`，后续迁移依次改为 `0003_chunks.py`、`0004_embeddings.py`、`0005_chat.py`、`0006_notes.py`、`0007_usage_evaluation.py`，避免形成多个 Alembic head。
+
 **关键约束：** MVP 不做 OCR；扫描件和低质量解析进入 `NEEDS_REVIEW` 或 `FAILED`，不能伪装成成功。
 
 ### 任务 7：实现结构感知切片并串联入库流程
 
 **目标：** 按章节、段落、表格和页面信息切片，保证可检索性与引用可追溯性。
 
-**主要文件：** `ingestion/chunker.py`、`ingestion/pipeline.py`、`migrations/versions/0002_chunks.py` 及切片测试。
+**主要文件：** `ingestion/chunker.py`、`ingestion/models.py`、`ingestion/pipeline.py`、`ingestion/celery_tasks.py`、`papers/repository.py`、`shared/errors.py`、`migrations/env.py`、`migrations/versions/0003_chunks.py`，以及切片、编排和 Celery 测试。
 
 **输出接口：** `ChunkingConfig`、`ChunkDraft`、`StructuralChunker.chunk`、`document_chunk`、`process_document(version_id)`。
 
@@ -181,11 +189,15 @@
 - [ ] 步骤 6：重复执行同一版本，验证不会生成重复切片。
 - [ ] 步骤 7：准备用户提交检查点。
 
+**编排与持久化修正：** 切片配置必须满足目标 token 为正、重叠非负且小于目标值；空白元素忽略，单个超大表格或元素保持原子性。参考文献块优先标记为 `reference`，纯表格为 `table`，纯图片说明为 `figure`，其余为 `text`。中文检索文本在应用侧分词，纯英文保持原文。`DocumentChunkModel` 必须注册到 Alembic metadata；切片按版本、序号和流水线版本幂等 upsert，重试保留既有行 ID，并删除同版本的过期序号。
+
+Worker 每次调用都创建并在 `finally` 释放独立 async engine/session，不能跨多个 `asyncio.run` 复用 API 全局 engine。可重试项目错误映射为 `TransientInfrastructureError`，无效 UUID 和不可重试错误不自动重试。流水线持久经过 `VALIDATING → PARSING → NORMALIZING → CHUNKING → EMBEDDING`，进度为 1 到 5；Task 7 完成后论文/版本仍为 `PROCESSING`，任务停在 `EMBEDDING/RUNNING`，只有 Task 9 能设为 `READY` 并切换当前版本。`NEEDS_REVIEW` 不生成切片；切片失败必须回滚并在正确阶段持久标记论文、版本和任务失败。已到 `EMBEDDING` 或更后阶段的重复执行在 Task 9 接入前直接幂等返回。
+
 ### 任务 8：实现论文库、上传和持久进度界面
 
 **目标：** 用户可以上传 PDF、查看论文列表和持久任务进度，刷新或服务重启后仍能恢复状态。
 
-**主要文件：** 前端 `features/papers`、`app/papers/page.tsx`、`lib/api.ts`、后端论文与任务查询路由及 Playwright 测试。
+**主要文件：** 前端 `features/papers`、`app/papers/page.tsx`、`lib/api.ts`、Vitest/Playwright 配置，后端论文与任务查询路由/服务/仓储、CORS 配置、Compose 迁移启动及契约测试。
 
 **输出接口：** `UploadPanel`、`TaskProgress`、论文列表页、列表与任务响应 Schema。
 
@@ -199,11 +211,17 @@
 - [ ] 步骤 8：重启 API/Worker，验证论文和任务状态仍存在。
 - [ ] 步骤 9：准备用户提交检查点。
 
+**编排与契约修正：** 浏览器沿用 `NEXT_PUBLIC_API_URL` 直接调用 FastAPI，并通过严格配置的 Web Origin CORS 访问；不增加 Next.js BFF、Server Action 或浏览器侧秘密。论文列表使用 `(created_at, id)` 降序 keyset 分页，游标为只含这两个值的 URL-safe base64 JSON，`limit` 为 1..100、默认 50。页面从 PostgreSQL 支撑的列表/任务接口恢复卡片，并按 `taskId` 去重。
+
+失败任务重试必须锁定并复查任务行，只允许当前明确的瞬态错误码；在同一事务中增加 `retry_count`、仅把状态改为 `QUEUED`、保留原阶段/进度/错误，并写入唯一的 `document.retry_requested` Outbox 事件。并发重试只能成功一次。缺失资源返回 404，非法游标返回 400，不可重试状态返回 409。
+
+后端镜像需要包含 Alembic 配置与迁移，Compose 在 API/Worker 前运行一次 `alembic upgrade head`，Redis 不再发布容易冲突的主机 6379 端口。Task 8 的有效论文允许停在 `EMBEDDING/RUNNING`，因为 Task 9 才负责 READY；E2E 使用具有 PDF MIME 与 `%PDF-` 头但正文损坏的文件验证 Worker 产生的持久失败，不把普通非 PDF 错误误写成持久任务。
+
 ### 任务 9：建立版本化 Embedding Space 并完成 READY 切换
 
 **目标：** 对切片分批向量化，记录模型和维度，只有全部索引成功后才原子切换当前版本为 `READY`。
 
-**主要文件：** `providers/openai_embeddings.py`、`retrieval/models.py`、`ingestion/pipeline.py`、`migrations/versions/0003_embeddings.py` 及测试。
+**主要文件：** `providers/openai_embeddings.py`、`retrieval/models.py`、`ingestion/pipeline.py`、`migrations/versions/0004_embeddings.py` 及测试。
 
 **输出接口：** `EmbeddingSpace`、`ChunkEmbeddingModel`、`OpenAICompatibleEmbeddingProvider`、`IngestionPipeline.embed_and_activate`。
 
@@ -355,7 +373,7 @@
 
 - [ ] 步骤 1：添加文件大小、页数、CORS、模型超时、任务软硬超时和 `/health/ready`。
 - [ ] 步骤 2：编写伪 PDF、错误 MIME、超大文件、路径穿越和 Prompt Injection 测试。
-- [ ] 步骤 3：实现 PostgreSQL Custom Dump、MinIO Mirror、计数清单和恢复脚本。
+- [ ] 步骤 3：实现 PostgreSQL Custom Dump、MinIO Mirror、计数清单和恢复脚本；聊天计数使用实际的 `chat_message` 与 `chat_run` 表，引用随消息 JSON 一起恢复。
 - [ ] 步骤 4：由用户选择至少 30 篇论文并审核至少 50 个问题及证据切片。
 - [ ] 步骤 5：编写上传到笔记保存的完整后端 E2E。
 - [ ] 步骤 6：建立统一 Windows 验证入口 `scripts/verify.ps1`。
@@ -397,7 +415,19 @@
 - 中文版本用于理解和跟踪；需要复制代码、SQL、Docker 配置或完整命令时，使用英文规范源中相同任务、相同步骤的代码块。
 - 修改英文计划时，必须同步更新中文计划的全局约束、任务编号、接口、步骤标题、检查点和验收门槛。
 - 修改中文解释但不改变实现含义时，不需要反向改动英文代码块。
-- Git 提交始终由用户执行，除非用户在当次对话中明确授权。
+- 自产品任务 2 起，用户持续授权 Agent 在所需验证全部通过且独立任务审查无阻断问题后，暂存精确的任务范围文件并执行 `git commit`。Agent 必须报告已提交范围、提交消息和验证证据。该持续授权不包含 `git push`、合并、移除工作树或被忽略的 SDD 产物；每项集成或清理操作仍需用户分别明确授权。
+
+## 双语文档目录约定（自产品任务 2 起生效）
+
+- 新的正式设计文档使用 `docs/superpowers/specs/EN/<相同文件名>.md` 和 `docs/superpowers/specs/CN/<相同文件名>.md`；新的正式实施计划使用 `docs/superpowers/plans/EN/<相同文件名>.md` 和 `docs/superpowers/plans/CN/<相同文件名>.md`。
+- SDD 工作流产物使用 `.superpowers/sdd/EN/task-N-{brief,report,review}.md` 和 `.superpowers/sdd/CN/task-N-{brief,report,review}.md`；进度文件使用 `.superpowers/sdd/EN/progress.md` 和 `.superpowers/sdd/CN/progress.md`。对应的英文和中文文件使用相同文件名，不再使用 `.zh-CN` 后缀。
+- 英文是规范源。中文配套文件必须忠实保持英文实现含义，并原样保留每个代码块、命令、路径、接口名称、依赖版本、哈希、预期结果、测试证据、原始日志和任务边界。
+- 每份英文文档通过 `../CN/<相同文件名>` 链接中文配套文件；每份中文文档通过 `../EN/<相同文件名>` 链接英文规范源。
+- 控制器负责每组双语 Brief 和双语 Progress；实现者负责每组双语 Report；审查者负责每组双语 Review。
+- 同步是交接门槛：负责角色必须创建或更新两种语言的文件并验证语义一致后，才能把工作交给下一个角色。
+- 每个产品任务完成后，控制器必须停在用户验收检查点。只有用户明确授权后，才能启动下一个产品任务。
+- 已有正式文档和产品任务 1 的 SDD 产物保留在当前路径。不得重新运行、重新测试、重新审查、移动产品任务 1，也不得为其追补产物。
+- 自产品任务 2 起，用户持续授权 Agent 在所需验证全部通过且独立任务审查无阻断问题后，暂存精确的任务范围文件并执行 `git commit`。Agent 必须报告已提交范围、提交消息和验证证据。该持续授权不包含 `git push`、合并、移除工作树或被忽略的 `.superpowers/sdd` 工作流产物；每项集成或清理操作仍需用户分别明确授权。
 
 ## 七、官方实现参考
 

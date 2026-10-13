@@ -1,0 +1,26 @@
+services:
+  api:
+    ports: !reset []
+
+  web:
+    ports: !reset []
+
+  gateway:
+    image: nginx:1.28-alpine
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    volumes:
+      - ./nginx-ha.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "127.0.0.1:${API_HOST_PORT:-8000}:8000"
+      - "127.0.0.1:${WEB_HOST_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8000/gateway-health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
