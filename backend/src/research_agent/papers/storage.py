@@ -146,6 +146,9 @@ class MinioObjectStorage:
                 try:
                     self._client.make_bucket(self._bucket)
                 except S3Error as error:
-                    if error.code not in {"BucketAlreadyOwnedByYou", "BucketAlreadyExists"}:
+                    if error.code not in {
+                        "BucketAlreadyOwnedByYou",
+                        "BucketAlreadyExists",
+                    }:
                         raise
             self._bucket_ready = True

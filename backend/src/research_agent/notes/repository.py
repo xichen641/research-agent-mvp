@@ -213,9 +213,7 @@ class SqlNoteRepository:
                 .where(NoteRevisionModel.note_id == note_id)
             )
         ).all()
-        trusted = {
-            (row.field_key, row.chunk_id): _evidence_record(row) for row in rows
-        }
+        trusted = {(row.field_key, row.chunk_id): _evidence_record(row) for row in rows}
         # Preserve template and citation order for stable API/UI rendering.
         # 保留模板与引用顺序，确保 API 和界面展示稳定。
         return [

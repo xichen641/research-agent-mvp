@@ -4,31 +4,18 @@ from contextlib import asynccontextmanager, suppress
 import logging
 from uuid import UUID
 
-import httpx
-from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph.state import CompiledStateGraph
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from research_agent.chat.domain import (
     ChatSessionRecord,
     PreparedChatRun,
-)
-from research_agent.chat.graph import (
-    GraphDependencies,
-    _checkpoint_database_url,
-    compile_chat_graph,
+    RetrievalMode,
 )
 from research_agent.chat.repository import SqlChatRepository
 from research_agent.chat.service import ChatService
 from research_agent.config import Settings
-from research_agent.providers.openai_embeddings import (
-    build_openai_embedding_provider,
-)
-from research_agent.providers.qwen_llm import QwenLLMProvider
-from research_agent.providers.qwen_reranker import QwenRerankerProvider
 from research_agent.retrieval.domain import RetrievalScope
-from research_agent.retrieval.repository import SqlHybridRetrievalRepository
-from research_agent.retrieval.service import RetrievalService
 from research_agent.shared.errors import AppError
 
 
@@ -45,10 +32,13 @@ class ChatApplication:
     def __init__(
         self,
         session_factory: async_sessionmaker[AsyncSession],
-        graph_builder: GraphBuilder,
+        graph_builder: GraphBuilder | None = None,
+        *,
+        dispatch_outbox: bool = False,
     ) -> None:
         self._session_factory = session_factory
         self._graph_builder = graph_builder
+        self._dispatch_outbox = dispatch_outbox
         self._tasks: set[asyncio.Task[None]] = set()
 
     async def create_session(
@@ -59,22 +49,38 @@ class ChatApplication:
                 title=title, scope=scope
             )
 
-    async def start(self, *, session_id: UUID, question: str) -> UUID:
+    async def start(
+        self,
+        *,
+        session_id: UUID,
+        question: str,
+        retrieval_mode: RetrievalMode = "auto",
+    ) -> UUID:
         async with self._session_factory() as session:
             repository = SqlChatRepository(session)
             chat_session = await repository.get_session(session_id)
             if chat_session is None:
                 raise AppError("CHAT_SESSION_NOT_FOUND", "Chat session was not found")
             run = await repository.start_run(
-                session_id=session_id, question=question
+                session_id=session_id,
+                question=question,
+                scope=chat_session.scope,
+                retrieval_mode=retrieval_mode,
+                dispatch=self._dispatch_outbox,
             )
             prepared = PreparedChatRun(
                 run_id=run.id,
                 session_id=session_id,
                 question=question,
                 scope=chat_session.scope,
+                retrieval_mode=retrieval_mode,
+                history_message_count=run.history_message_count,
             )
 
+        if self._dispatch_outbox:
+            return run.id
+        if self._graph_builder is None:
+            raise RuntimeError("inline chat execution requires a graph builder")
         task = asyncio.create_task(self._execute(prepared))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
@@ -91,7 +97,10 @@ class ChatApplication:
     async def _execute(self, prepared: PreparedChatRun) -> None:
         async with self._session_factory() as session:
             repository = SqlChatRepository(session)
-            graph = self._graph_builder(repository, session)
+            graph_builder = self._graph_builder
+            if graph_builder is None:
+                raise RuntimeError("inline chat execution requires a graph builder")
+            graph = graph_builder(repository, session)
             try:
                 await ChatService(repository, graph).execute(prepared)
             except asyncio.CancelledError:
@@ -131,51 +140,15 @@ async def production_chat_application(
     settings: Settings,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> AsyncIterator[ChatApplication]:
-    """Own provider clients and one durable saver for the API process.
+    """Persist and dispatch runs; workers own model and graph resources.
 
-    在 API 进程生命周期内统一管理模型客户端和持久化检查点。
+    API 只负责持久化与投递，模型和图资源由 Worker 独占。
     """
 
     if not chat_provider_configured(settings):
         raise ValueError("chat providers are not fully configured")
-    embeddings = build_openai_embedding_provider(settings)
-    async with (
-        httpx.AsyncClient(timeout=settings.llm_timeout_seconds) as llm_client,
-        httpx.AsyncClient(timeout=30.0) as reranker_client,
-        AsyncPostgresSaver.from_conn_string(
-            _checkpoint_database_url(settings.database_url)
-        ) as saver,
-    ):
-        await saver.setup()
-        llm = QwenLLMProvider(
-            client=llm_client,
-            base_url=settings.llm_base_url,
-            api_key=settings.llm_api_key or settings.embedding_api_key,
-            model_id=settings.llm_model,
-        )
-        reranker = QwenRerankerProvider(
-            client=reranker_client,
-            base_url=settings.reranker_base_url,
-            api_key=settings.reranker_api_key,
-            model_id=settings.reranker_model,
-        )
-
-        def graph_builder(
-            chats: SqlChatRepository,
-            session: AsyncSession,
-        ) -> CompiledStateGraph:
-            retrieval = RetrievalService(
-                SqlHybridRetrievalRepository(session),
-                embeddings,
-                reranker,
-            )
-            return compile_chat_graph(
-                GraphDependencies(llm=llm, retrieval=retrieval, chats=chats),
-                checkpointer=saver,
-            )
-
-        application = ChatApplication(session_factory, graph_builder)
-        try:
-            yield application
-        finally:
-            await application.shutdown()
+    application = ChatApplication(session_factory, dispatch_outbox=True)
+    try:
+        yield application
+    finally:
+        await application.shutdown()

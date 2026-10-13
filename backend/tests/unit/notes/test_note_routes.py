@@ -87,9 +87,7 @@ async def test_generation_is_queued_only_after_explicit_request() -> None:
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as client:
-        response = await client.post(
-            f"/api/v1/documents/{document_id}/notes/generate"
-        )
+        response = await client.post(f"/api/v1/documents/{document_id}/notes/generate")
 
     assert response.status_code == 202
     assert sender.calls == [
@@ -102,7 +100,9 @@ async def test_generation_is_queued_only_after_explicit_request() -> None:
 
 
 @pytest.mark.asyncio
-async def test_regenerate_queues_non_activating_draft_and_user_save_confirms_fields() -> None:
+async def test_regenerate_queues_non_activating_draft_and_user_save_confirms_fields() -> (
+    None
+):
     sender = FakeSender()
     repository = FakeNoteRepository()
     app = create_app(web_origin="http://web.test")

@@ -85,10 +85,16 @@ class PersistedChatStream:
         self, events: list[ChatRunEventRecord]
     ) -> VerifiedAnswer:
         completed = next(
-            (event for event in reversed(events) if event.event_type == "run_completed"),
+            (
+                event
+                for event in reversed(events)
+                if event.event_type == "run_completed"
+            ),
             None,
         )
-        raw_message_id = None if completed is None else completed.payload.get("message_id")
+        raw_message_id = (
+            None if completed is None else completed.payload.get("message_id")
+        )
         try:
             message_id = UUID(str(raw_message_id))
         except (TypeError, ValueError):
@@ -127,9 +133,7 @@ class PersistedChatStream:
             # Re-check terminal state so verified UI parts are persisted as soon
             # as the background run completes.
             await self.prepare(run_id)
-            events = await self._repository.list_events(
-                run_id, after_sequence=cursor
-            )
+            events = await self._repository.list_events(run_id, after_sequence=cursor)
             for event in events:
                 cursor = event.sequence
                 payload = event_to_ui_part(event, run_id)
@@ -221,6 +225,11 @@ def event_to_ui_part(
         return {
             "type": "data-workflow",
             "data": {"stage": stage, "status": "completed"},
+        }
+    if event.event_type == "answer_generation_started":
+        return {
+            "type": "data-workflow",
+            "data": {"stage": "answer", "status": "running"},
         }
     if event.event_type == "run_failed":
         return {

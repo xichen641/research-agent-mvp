@@ -32,10 +32,15 @@ class RetrievalService:
         repository: HybridRetrievalRepository,
         embeddings: EmbeddingProvider,
         reranker: RerankerProvider,
+        *,
+        default_final_limit: int = 10,
     ) -> None:
+        if default_final_limit <= 0:
+            raise ValueError("default_final_limit must be positive")
         self._repository = repository
         self._embeddings = embeddings
         self._reranker = reranker
+        self._default_final_limit = default_final_limit
 
     async def retrieve(
         self,
@@ -44,8 +49,10 @@ class RetrievalService:
         lexical_limit: int = 40,
         vector_limit: int = 40,
         fused_limit: int = 25,
-        final_limit: int = 10,
+        final_limit: int | None = None,
     ) -> list[RetrievalCandidate]:
+        if final_limit is None:
+            final_limit = self._default_final_limit
         _validate_limits(lexical_limit, vector_limit, fused_limit, final_limit)
         query_vector = await self._embeddings.embed_query(query.semantic_query)
         lexical, vector = await asyncio.gather(

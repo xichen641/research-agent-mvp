@@ -24,3 +24,11 @@ def test_llm_timeout_is_long_enough_for_evidence_backed_generation() -> None:
 def test_llm_timeout_rejects_non_positive_values() -> None:
     with pytest.raises(ValidationError, match="positive"):
         Settings(llm_timeout_seconds=0)
+
+
+def test_memory_recent_window_must_fit_inside_context_budget() -> None:
+    with pytest.raises(ValidationError, match="smaller"):
+        Settings(
+            memory_max_context_tokens=1_000,
+            memory_recent_message_tokens=1_000,
+        )

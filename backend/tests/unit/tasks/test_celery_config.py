@@ -6,6 +6,8 @@ from celery.app.task import Task
 from celery.exceptions import Retry
 import pytest
 
+from research_agent.chat import celery_tasks as chat_celery_tasks
+from research_agent.chat.celery_tasks import process_chat_run
 from research_agent.ingestion import celery_tasks
 from research_agent.ingestion.celery_tasks import process_document, run_ingestion_job
 from research_agent.shared.errors import AppError, TransientInfrastructureError
@@ -23,10 +25,12 @@ def test_celery_app_uses_durable_delivery_settings_and_exact_routes() -> None:
     assert app.conf.task_routes == {
         "research_agent.ingestion.process_document": {"queue": "paper_ingestion"},
         "research_agent.notes.generate_note": {"queue": "note_generation"},
+        "research_agent.chat.process_run": {"queue": "chat_generation"},
     }
     assert app.conf.imports == (
         "research_agent.ingestion.celery_tasks",
         "research_agent.notes.celery_tasks",
+        "research_agent.chat.celery_tasks",
     )
 
 
@@ -60,6 +64,28 @@ def test_process_document_rejects_invalid_uuid_without_starting_job(
     task = cast(Task, process_document)
     with pytest.raises(ValueError):
         task.apply(kwargs={"version_id": "not-a-uuid"}, throw=True)
+
+    job.assert_not_called()
+
+
+def test_process_chat_run_dispatches_valid_uuid(monkeypatch) -> None:
+    run_id = "019f6500-0000-7000-8000-000000000002"
+    job = AsyncMock()
+    monkeypatch.setattr(chat_celery_tasks, "run_chat_job", job)
+
+    task = cast(Task, process_chat_run)
+    task.apply(kwargs={"run_id": run_id}, throw=True)
+
+    job.assert_awaited_once_with(UUID(run_id))
+
+
+def test_process_chat_run_rejects_invalid_uuid(monkeypatch) -> None:
+    job = AsyncMock()
+    monkeypatch.setattr(chat_celery_tasks, "run_chat_job", job)
+
+    task = cast(Task, process_chat_run)
+    with pytest.raises(ValueError):
+        task.apply(kwargs={"run_id": "not-a-uuid"}, throw=True)
 
     job.assert_not_called()
 

@@ -1,3 +1,4 @@
+from datetime import UTC, datetime, timedelta
 from typing import Protocol, cast, runtime_checkable
 from uuid import UUID
 
@@ -12,15 +13,19 @@ from research_agent.chat.domain import (
     ChatRunRecord,
     ChatRunStatus,
     ChatSessionRecord,
+    ConversationMemoryRecord,
+    RetrievalMode,
     RetrievalScope,
     VerifiedAnswer,
 )
 from research_agent.chat.models import (
+    ChatMemoryModel,
     ChatMessageModel,
     ChatRunEventModel,
     ChatRunModel,
     ChatSessionModel,
 )
+from research_agent.papers.models import OutboxEventModel
 from research_agent.shared.errors import AppError
 from research_agent.shared.ids import new_id
 
@@ -46,7 +51,21 @@ class ChatRepository(Protocol):
 
     async def get_session(self, session_id: UUID) -> ChatSessionRecord | None: ...
 
-    async def start_run(self, *, session_id: UUID, question: str) -> ChatRunRecord: ...
+    async def list_sessions(self, *, limit: int = 100) -> list[ChatSessionRecord]: ...
+
+    async def start_run(
+        self,
+        *,
+        session_id: UUID,
+        question: str,
+        scope: RetrievalScope | None = None,
+        retrieval_mode: RetrievalMode = "auto",
+        dispatch: bool = False,
+    ) -> ChatRunRecord: ...
+
+    async def claim_run(
+        self, run_id: UUID, *, lease: timedelta
+    ) -> ChatRunRecord | None: ...
 
     async def record_event(
         self, *, run_id: UUID, event_type: str, payload: dict[str, object]
@@ -64,6 +83,8 @@ class ChatRepository(Protocol):
 
     async def get_run(self, run_id: UUID) -> ChatRunRecord | None: ...
 
+    async def get_latest_run(self, session_id: UUID) -> ChatRunRecord | None: ...
+
     async def list_events(
         self, run_id: UUID, *, after_sequence: int = 0
     ) -> list[ChatRunEventRecord]: ...
@@ -76,10 +97,30 @@ class ChatRepository(Protocol):
         events: list[tuple[str, dict[str, object]]],
     ) -> bool: ...
 
+    async def get_memory(self, session_id: UUID) -> ConversationMemoryRecord | None: ...
+
+    async def save_memory(
+        self,
+        *,
+        session_id: UUID,
+        summary: str,
+        durable_facts: tuple[str, ...],
+        covered_message_count: int,
+        expected_revision: int,
+    ) -> ConversationMemoryRecord | None: ...
+
 
 class SqlChatRepository:
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        *,
+        lease_duration: timedelta = timedelta(minutes=30),
+    ) -> None:
+        if lease_duration.total_seconds() <= 0:
+            raise ValueError("chat run lease duration must be positive")
         self._session = session
+        self._lease_duration = lease_duration
 
     async def create_session(
         self, *, title: str, scope: RetrievalScope
@@ -103,18 +144,94 @@ class SqlChatRepository:
     async def get_session(self, session_id: UUID) -> ChatSessionRecord | None:
         try:
             model = await self._session.get(ChatSessionModel, session_id)
+            record = None if model is None else _session_record(model)
+            await self._session.commit()
         except SQLAlchemyError:
+            await self._rollback_after_error()
             raise ChatPersistenceError() from None
-        return None if model is None else _session_record(model)
+        return record
 
-    async def start_run(self, *, session_id: UUID, question: str) -> ChatRunRecord:
+    async def list_sessions(self, *, limit: int = 100) -> list[ChatSessionRecord]:
+        if limit < 1 or limit > 500:
+            raise ValueError("chat session limit must be between 1 and 500")
+        statement = (
+            select(ChatSessionModel)
+            .order_by(ChatSessionModel.updated_at.desc(), ChatSessionModel.id.desc())
+            .limit(limit)
+        )
+        try:
+            models = (await self._session.scalars(statement)).all()
+            records = [_session_record(model) for model in models]
+            await self._session.commit()
+        except SQLAlchemyError:
+            await self._rollback_after_error()
+            raise ChatPersistenceError() from None
+        return records
+
+    async def start_run(
+        self,
+        *,
+        session_id: UUID,
+        question: str,
+        scope: RetrievalScope | None = None,
+        retrieval_mode: RetrievalMode = "auto",
+        dispatch: bool = False,
+    ) -> ChatRunRecord:
         if not question.strip():
             raise ValueError("question must not be blank")
+        if retrieval_mode not in {"auto", "off", "on"}:
+            raise ValueError("invalid retrieval mode")
+        try:
+            chat_session = (
+                await self._session.scalars(
+                    select(ChatSessionModel)
+                    .where(ChatSessionModel.id == session_id)
+                    .with_for_update()
+                )
+            ).one_or_none()
+            if chat_session is None:
+                raise ChatSessionNotFoundError(
+                    f"chat session {session_id} does not exist"
+                )
+            active_run = await self._session.scalar(
+                select(ChatRunModel.id)
+                .where(
+                    ChatRunModel.session_id == session_id,
+                    ChatRunModel.status.in_(("QUEUED", "RUNNING")),
+                )
+                .limit(1)
+            )
+            if active_run is not None:
+                raise AppError(
+                    "CHAT_RUN_IN_PROGRESS",
+                    "Wait for the current chat turn to finish before starting another",
+                )
+            history_message_count = int(
+                await self._session.scalar(
+                    select(func.count(ChatMessageModel.id)).where(
+                        ChatMessageModel.session_id == session_id
+                    )
+                )
+                or 0
+            )
+        except (ChatSessionNotFoundError, AppError):
+            await self._session.rollback()
+            raise
+        except SQLAlchemyError:
+            await self._rollback_after_error()
+            raise ChatPersistenceError() from None
+        resolved_scope = scope or _scope(chat_session.scope)
+        chat_session.updated_at = func.now()
         run = ChatRunModel(
             id=new_id(),
             session_id=session_id,
-            status="RUNNING",
+            status="QUEUED" if dispatch else "RUNNING",
             error_code=None,
+            question=question.strip(),
+            scope={"document_ids": [str(item) for item in resolved_scope.document_ids]},
+            retrieval_mode=retrieval_mode,
+            history_message_count=history_message_count,
+            lease_expires_at=None,
             completed_at=None,
         )
         message = ChatMessageModel(
@@ -130,19 +247,55 @@ class SqlChatRepository:
             payload={},
         )
         try:
-            if await self._session.get(ChatSessionModel, session_id) is None:
-                raise ChatSessionNotFoundError(f"chat session {session_id} does not exist")
             self._session.add_all([run, message])
             # Flush the parent row before the event because no ORM relationship is
             # needed solely to communicate the database foreign-key dependency.
             # 先刷新父记录再写事件；无需仅为表达数据库外键而引入 ORM 关系。
             await self._session.flush()
             self._session.add(event)
+            if dispatch:
+                self._session.add(
+                    OutboxEventModel(
+                        id=new_id(),
+                        event_type="chat.run.requested",
+                        payload={"run_id": str(run.id)},
+                        attempts=0,
+                        available_at=datetime.now(UTC),
+                        sent_at=None,
+                    )
+                )
+            await self._session.commit()
+            await self._session.refresh(run)
+        except (ChatSessionNotFoundError, AppError):
+            await self._session.rollback()
+            raise
+        except SQLAlchemyError:
+            await self._rollback_after_error()
+            raise ChatPersistenceError() from None
+        return _run_record(run)
+
+    async def claim_run(
+        self, run_id: UUID, *, lease: timedelta
+    ) -> ChatRunRecord | None:
+        if lease.total_seconds() <= 0:
+            raise ValueError("chat run lease must be positive")
+        now = datetime.now(UTC)
+        try:
+            run = await self._lock_run(run_id)
+            claimable = run.status == "QUEUED" or (
+                run.status == "RUNNING"
+                and (run.lease_expires_at is None or run.lease_expires_at <= now)
+            )
+            if not claimable:
+                await self._session.rollback()
+                return None
+            run.status = "RUNNING"
+            run.lease_expires_at = now + lease
             await self._session.commit()
             await self._session.refresh(run)
         except ChatSessionNotFoundError:
             await self._session.rollback()
-            raise
+            return None
         except SQLAlchemyError:
             await self._rollback_after_error()
             raise ChatPersistenceError() from None
@@ -154,8 +307,10 @@ class SqlChatRepository:
         if not event_type.strip():
             raise ValueError("event type must not be blank")
         try:
-            await self._lock_run(run_id)
+            run = await self._lock_run(run_id)
             sequence = await self._next_event_sequence(run_id)
+            if run.status == "RUNNING":
+                run.lease_expires_at = datetime.now(UTC) + self._lease_duration
             event = ChatRunEventModel(
                 run_id=run_id,
                 sequence=sequence,
@@ -190,6 +345,7 @@ class SqlChatRepository:
             run.status = "SUCCEEDED"
             run.error_code = None
             run.completed_at = func.now()
+            run.lease_expires_at = None
             event = ChatRunEventModel(
                 run_id=run_id,
                 sequence=sequence,
@@ -217,6 +373,7 @@ class SqlChatRepository:
             run.status = "FAILED"
             run.error_code = error_code
             run.completed_at = func.now()
+            run.lease_expires_at = None
             self._session.add(
                 ChatRunEventModel(
                     run_id=run_id,
@@ -241,23 +398,48 @@ class SqlChatRepository:
         )
         try:
             models = (await self._session.scalars(statement)).all()
+            records = [_message_record(model) for model in models]
+            await self._session.commit()
         except SQLAlchemyError:
+            await self._rollback_after_error()
             raise ChatPersistenceError() from None
-        return [_message_record(model) for model in models]
+        return records
 
     async def get_message(self, message_id: UUID) -> ChatMessageRecord | None:
         try:
             model = await self._session.get(ChatMessageModel, message_id)
+            record = None if model is None else _message_record(model)
+            await self._session.commit()
         except SQLAlchemyError:
+            await self._rollback_after_error()
             raise ChatPersistenceError() from None
-        return None if model is None else _message_record(model)
+        return record
 
     async def get_run(self, run_id: UUID) -> ChatRunRecord | None:
         try:
             model = await self._session.get(ChatRunModel, run_id)
+            record = None if model is None else _run_record(model)
+            await self._session.commit()
         except SQLAlchemyError:
+            await self._rollback_after_error()
             raise ChatPersistenceError() from None
-        return None if model is None else _run_record(model)
+        return record
+
+    async def get_latest_run(self, session_id: UUID) -> ChatRunRecord | None:
+        statement = (
+            select(ChatRunModel)
+            .where(ChatRunModel.session_id == session_id)
+            .order_by(ChatRunModel.created_at.desc(), ChatRunModel.id.desc())
+            .limit(1)
+        )
+        try:
+            model = (await self._session.scalars(statement)).one_or_none()
+            record = None if model is None else _run_record(model)
+            await self._session.commit()
+        except SQLAlchemyError:
+            await self._rollback_after_error()
+            raise ChatPersistenceError() from None
+        return record
 
     async def list_events(
         self, run_id: UUID, *, after_sequence: int = 0
@@ -272,9 +454,12 @@ class SqlChatRepository:
         )
         try:
             models = (await self._session.scalars(statement)).all()
+            records = [_event_record(model) for model in models]
+            await self._session.commit()
         except SQLAlchemyError:
+            await self._rollback_after_error()
             raise ChatPersistenceError() from None
-        return [_event_record(model) for model in models]
+        return records
 
     async def append_events_if_absent(
         self,
@@ -319,17 +504,90 @@ class SqlChatRepository:
             raise ChatPersistenceError() from None
         return True
 
+    async def get_memory(self, session_id: UUID) -> ConversationMemoryRecord | None:
+        try:
+            model = await self._session.get(ChatMemoryModel, session_id)
+            record = None if model is None else _memory_record(model)
+            await self._session.commit()
+        except SQLAlchemyError:
+            await self._rollback_after_error()
+            raise ChatPersistenceError() from None
+        return record
+
+    async def save_memory(
+        self,
+        *,
+        session_id: UUID,
+        summary: str,
+        durable_facts: tuple[str, ...],
+        covered_message_count: int,
+        expected_revision: int,
+    ) -> ConversationMemoryRecord | None:
+        if not summary.strip():
+            raise ValueError("memory summary must not be blank")
+        if covered_message_count < 0 or expected_revision < 0:
+            raise ValueError("memory counts and revisions must not be negative")
+        try:
+            chat_session = (
+                await self._session.scalars(
+                    select(ChatSessionModel)
+                    .where(ChatSessionModel.id == session_id)
+                    .with_for_update()
+                )
+            ).one_or_none()
+            if chat_session is None:
+                raise ChatSessionNotFoundError(
+                    f"chat session {session_id} does not exist"
+                )
+            model = (
+                await self._session.scalars(
+                    select(ChatMemoryModel)
+                    .where(ChatMemoryModel.session_id == session_id)
+                    .with_for_update()
+                )
+            ).one_or_none()
+            current_revision = 0 if model is None else model.revision
+            if current_revision != expected_revision:
+                await self._session.rollback()
+                return None
+            if model is None:
+                model = ChatMemoryModel(
+                    session_id=session_id,
+                    summary=summary.strip(),
+                    durable_facts=list(durable_facts),
+                    covered_message_count=covered_message_count,
+                    revision=1,
+                )
+                self._session.add(model)
+            else:
+                model.summary = summary.strip()
+                model.durable_facts = list(durable_facts)
+                model.covered_message_count = covered_message_count
+                model.revision += 1
+                model.updated_at = func.now()
+            await self._session.commit()
+            await self._session.refresh(model)
+        except ChatSessionNotFoundError:
+            await self._session.rollback()
+            raise
+        except SQLAlchemyError:
+            await self._rollback_after_error()
+            raise ChatPersistenceError() from None
+        return _memory_record(model)
+
     async def _lock_run(self, run_id: UUID) -> ChatRunModel:
-        statement = select(ChatRunModel).where(ChatRunModel.id == run_id).with_for_update()
+        statement = (
+            select(ChatRunModel).where(ChatRunModel.id == run_id).with_for_update()
+        )
         run = (await self._session.scalars(statement)).one_or_none()
         if run is None:
             raise ChatSessionNotFoundError(f"chat run {run_id} does not exist")
         return run
 
     async def _next_event_sequence(self, run_id: UUID) -> int:
-        statement = select(func.coalesce(func.max(ChatRunEventModel.sequence), 0)).where(
-            ChatRunEventModel.run_id == run_id
-        )
+        statement = select(
+            func.coalesce(func.max(ChatRunEventModel.sequence), 0)
+        ).where(ChatRunEventModel.run_id == run_id)
         return int(await self._session.scalar(statement) or 0) + 1
 
     async def _rollback_after_error(self) -> None:
@@ -374,6 +632,10 @@ def _run_record(model: ChatRunModel) -> ChatRunRecord:
         error_code=model.error_code,
         created_at=model.created_at,
         completed_at=model.completed_at,
+        question=model.question,
+        scope=None if model.scope is None else _scope(model.scope),
+        retrieval_mode=cast(RetrievalMode, model.retrieval_mode),
+        history_message_count=model.history_message_count,
     )
 
 
@@ -384,4 +646,18 @@ def _event_record(model: ChatRunEventModel) -> ChatRunEventRecord:
         event_type=model.event_type,
         payload=model.payload,
         created_at=model.created_at,
+    )
+
+
+def _memory_record(model: ChatMemoryModel) -> ConversationMemoryRecord:
+    facts = model.durable_facts
+    if not isinstance(facts, list) or any(not isinstance(item, str) for item in facts):
+        raise ChatPersistenceError()
+    return ConversationMemoryRecord(
+        session_id=model.session_id,
+        summary=model.summary,
+        durable_facts=tuple(facts),
+        covered_message_count=model.covered_message_count,
+        revision=model.revision,
+        updated_at=model.updated_at,
     )

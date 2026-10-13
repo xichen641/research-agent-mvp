@@ -125,7 +125,10 @@ async def save_note(
     # A user save is authoritative: accepted or edited fields become confirmed.
     # 用户保存具有权威性：已接受或已编辑的字段统一转为用户确认状态。
     confirmed = PaperNoteContent(
-        fields=[field.model_copy(update={"status": "USER_CONFIRMED"}) for field in body.content.fields]
+        fields=[
+            field.model_copy(update={"status": "USER_CONFIRMED"})
+            for field in body.content.fields
+        ]
     )
     try:
         revision = await repository.save_user_edit(note_id=note_id, content=confirmed)

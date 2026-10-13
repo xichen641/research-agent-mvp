@@ -13,8 +13,6 @@ def pytest_asyncio_loop_factories(
     del config, item
     if sys.platform == "win32":
         return {
-            "selector": lambda: asyncio.SelectorEventLoop(
-                selectors.SelectSelector()
-            )
+            "selector": lambda: asyncio.SelectorEventLoop(selectors.SelectSelector())
         }
     return {"default": asyncio.new_event_loop}

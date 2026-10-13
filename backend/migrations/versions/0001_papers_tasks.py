@@ -136,9 +136,7 @@ def downgrade() -> None:
     op.drop_table("outbox_event")
     op.drop_index("uq_task_version_stage", table_name="document_task")
     op.drop_table("document_task")
-    op.drop_constraint(
-        "fk_document_current_version_id", "document", type_="foreignkey"
-    )
+    op.drop_constraint("fk_document_current_version_id", "document", type_="foreignkey")
     op.drop_table("document_version")
     op.drop_index("uq_document_sha256_active", table_name="document")
     op.drop_table("document")

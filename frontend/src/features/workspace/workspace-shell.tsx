@@ -4,9 +4,12 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
 
+import { useChatActivity } from "@/features/chat/chat-activity";
+
 
 export function WorkspaceShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
+  const { activity } = useChatActivity();
   const contextual = pathname.startsWith("/chat/")
     ? { href: pathname, label: "当前问答" }
     : pathname.includes("/notes")
@@ -33,6 +36,12 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
             active={pathname === "/papers" || pathname === "/"}
             icon="library"
           />
+          <WorkspaceLink
+            href="/chats"
+            label="历史问答"
+            active={pathname === "/chats"}
+            icon="chat"
+          />
           {contextual && (
             <WorkspaceLink
               href={contextual.href}
@@ -40,6 +49,18 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
               active
               icon={contextual.label === "当前问答" ? "chat" : "note"}
             />
+          )}
+          {activity && !pathname.startsWith(`/chat/${activity.sessionId}`) && (
+            <Link
+              href={`/chat/${activity.sessionId}`}
+              className="mt-3 block rounded-xl border border-blue-400/20 bg-blue-500/10 px-3 py-3 text-sm text-blue-100"
+            >
+              <span className="flex items-center gap-2 font-medium">
+                <span className={`size-2 rounded-full ${activity.status === "QUEUED" || activity.status === "RUNNING" ? "animate-pulse bg-amber-300" : activity.status === "SUCCEEDED" ? "bg-emerald-300" : "bg-red-300"}`} />
+                {activityLabel(activity.status)}
+              </span>
+              <span className="mt-1 block text-xs text-slate-400">点击返回当前问答</span>
+            </Link>
           )}
         </nav>
 
@@ -84,6 +105,13 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
       </div>
     </div>
   );
+}
+
+function activityLabel(status: "QUEUED" | "RUNNING" | "SUCCEEDED" | "FAILED") {
+  if (status === "QUEUED") return "问答正在排队";
+  if (status === "RUNNING") return "问答后台处理中";
+  if (status === "SUCCEEDED") return "问答已完成";
+  return "问答处理失败";
 }
 
 function WorkspaceLink({

@@ -1,7 +1,7 @@
 import { apiRequest } from "@/lib/api";
 import type { PaperList, TaskState, UploadReceipt } from "./types";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
 
 type UploadReceiptWire = {
   document_id: string;

@@ -124,9 +124,7 @@ async def test_parse_artifacts_round_trip_and_latest_task_ordering(
     assert version is not None
     assert version.parser_name == "docling"
     assert version.parser_version == "2.113.0"
-    assert version.parsed_json_object_key == (
-        "papers/doc/parsed/version/document.json"
-    )
+    assert version.parsed_json_object_key == ("papers/doc/parsed/version/document.json")
     assert version.parsed_markdown_object_key == (
         "papers/doc/parsed/version/document.md"
     )
@@ -176,7 +174,7 @@ async def test_parse_artifact_migration_upgrade_downgrade_and_single_head(
             )
         assert expected_columns <= upgraded_columns
         assert ScriptDirectory.from_config(config).get_heads() == [
-            "0006_notes"
+            "0009_durable_chat_runs"
         ]
 
         await asyncio.to_thread(command.downgrade, config, "0001_papers_tasks")
@@ -280,9 +278,7 @@ async def test_task_repository_translates_all_database_failures() -> None:
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_task_update_translates_orm_assignment_failure() -> None:
-    repository = SqlTaskRepository(
-        cast(AsyncSession, FailingAssignmentSession())
-    )
+    repository = SqlTaskRepository(cast(AsyncSession, FailingAssignmentSession()))
 
     with pytest.raises(TaskPersistenceError) as error:
         await repository.update_task(

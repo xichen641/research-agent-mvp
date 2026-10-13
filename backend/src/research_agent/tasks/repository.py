@@ -28,9 +28,7 @@ class TaskNotRetryableError(Exception):
 class TaskRepository(Protocol):
     async def get_task(self, task_id: EntityId) -> TaskRecord | None: ...
 
-    async def get_task_for_version(
-        self, version_id: EntityId
-    ) -> TaskRecord | None: ...
+    async def get_task_for_version(self, version_id: EntityId) -> TaskRecord | None: ...
 
     async def update_task(
         self,
@@ -66,9 +64,7 @@ class SqlTaskRepository:
             return None
         return _task_record(model)
 
-    async def get_task_for_version(
-        self, version_id: EntityId
-    ) -> TaskRecord | None:
+    async def get_task_for_version(self, version_id: EntityId) -> TaskRecord | None:
         try:
             statement = (
                 select(DocumentTaskModel)
@@ -162,18 +158,19 @@ class SqlTaskRepository:
 
 def _task_record(model: DocumentTaskModel) -> TaskRecord:
     return TaskRecord(
-            id=model.id,
-            document_version_id=model.document_version_id,
-            stage=TaskStage(model.stage),
-            status=TaskStatus(model.status),
-            progress_current=model.progress_current,
-            progress_total=model.progress_total,
-            retry_count=model.retry_count,
-            error_code=model.error_code,
-            error_message=model.error_message,
-        )
+        id=model.id,
+        document_version_id=model.document_version_id,
+        stage=TaskStage(model.stage),
+        status=TaskStatus(model.status),
+        progress_current=model.progress_current,
+        progress_total=model.progress_total,
+        retry_count=model.retry_count,
+        error_code=model.error_code,
+        error_message=model.error_message,
+    )
 
 
 if TYPE_CHECKING:
+
     def _task_repository_conformance(repository: SqlTaskRepository) -> TaskRepository:
         return repository

@@ -96,7 +96,9 @@ def test_table_and_picture_emit_every_provenance_entry(
     picture_elements = [
         element for element in parsed.elements if element.kind == "picture"
     ]
-    assert [(element.element_id, element.page_number) for element in table_elements] == [
+    assert [
+        (element.element_id, element.page_number) for element in table_elements
+    ] == [
         ("#/tables/0", 1),
         ("#/tables/0@prov-1", 2),
     ]
@@ -108,4 +110,6 @@ def test_table_and_picture_emit_every_provenance_entry(
         ("#/pictures/0", 1),
         ("#/pictures/0@prov-1", 2),
     ]
-    assert all(element.bbox is not None for element in table_elements + picture_elements)
+    assert all(
+        element.bbox is not None for element in table_elements + picture_elements
+    )

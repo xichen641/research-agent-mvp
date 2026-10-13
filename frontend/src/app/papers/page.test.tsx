@@ -111,7 +111,7 @@ it("selects a paper and exposes connected research actions", async () => {
   );
   expect(within(inspector).getByRole("link", { name: "查看原始 PDF" })).toHaveAttribute(
     "href",
-    "http://localhost:8000/api/v1/documents/document-ready/pdf",
+    "http://127.0.0.1:8000/api/v1/documents/document-ready/pdf",
   );
 
   fireEvent.click(within(inspector).getByRole("button", { name: "开始论文问答" }));

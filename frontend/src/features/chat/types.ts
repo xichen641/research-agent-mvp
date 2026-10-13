@@ -40,6 +40,8 @@ export type AssistantChatMessage = {
 
 export type ChatMessage = UserChatMessage | AssistantChatMessage;
 
+export type RetrievalMode = "auto" | "off" | "on";
+
 export type WorkflowUpdate = {
   stage: "plan" | "retrieval" | "rerank" | "citation_verification" | "answer";
   status: "running" | "completed" | "failed";

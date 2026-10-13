@@ -130,14 +130,10 @@ async def test_concurrent_equal_uploads_recover_unique_constraint_loser(
         )
         first, second = await asyncio.gather(
             first_service.upload_pdf(
-                UploadPaperCommand(
-                    "first.pdf", "application/pdf", BytesIO(content)
-                )
+                UploadPaperCommand("first.pdf", "application/pdf", BytesIO(content))
             ),
             second_service.upload_pdf(
-                UploadPaperCommand(
-                    "second.pdf", "application/pdf", BytesIO(content)
-                )
+                UploadPaperCommand("second.pdf", "application/pdf", BytesIO(content))
             ),
         )
 
@@ -148,9 +144,7 @@ async def test_concurrent_equal_uploads_recover_unique_constraint_loser(
     assert {receipt.version_id for receipt in receipts} == {first.version_id}
     assert {receipt.task_id for receipt in receipts} == {first.task_id}
     winner = next(receipt for receipt in receipts if not receipt.duplicate)
-    winner_key = (
-        f"papers/{winner.document_id}/source/{winner.version_id}.pdf"
-    )
+    winner_key = f"papers/{winner.document_id}/source/{winner.version_id}.pdf"
     assert len(storage.put_calls) == 2
     assert len(storage.delete_calls) == 1
     losing_key = next(key for key in storage.put_calls if key != winner_key)

@@ -79,6 +79,10 @@ class QwenLLMProvider:
                         "model": self.model_id,
                         "messages": request_messages,
                         "response_format": {"type": "json_object"},
+                        # Structured planning and cited-answer JSON do not need the
+                        # model's default long reasoning pass. Citation correctness
+                        # is enforced separately by the deterministic verifier.
+                        "enable_thinking": False,
                     },
                 )
             except httpx.HTTPError as error:

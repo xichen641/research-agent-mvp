@@ -1,15 +1,24 @@
 from collections.abc import AsyncIterator
-from typing import Annotated, Protocol
+from datetime import datetime
+from typing import Annotated, Literal, Protocol
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, Request, status
+from fastapi import APIRouter, Depends, Header, Query, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from research_agent.chat.domain import ChatSessionRecord
+from research_agent.chat.domain import (
+    ChatMessageRecord,
+    ChatRole,
+    ChatRunRecord,
+    ChatRunStatus,
+    ChatSessionRecord,
+    RetrievalMode,
+    VerifiedAnswer,
+)
 from research_agent.chat.repository import SqlChatRepository
-from research_agent.chat.stream import ChatStream, PersistedChatStream
+from research_agent.chat.stream import ChatStream, PersistedChatStream, answer_payload
 from research_agent.papers.routes import get_db_session
 from research_agent.retrieval.domain import RetrievalScope
 from research_agent.shared.errors import AppError
@@ -23,7 +32,23 @@ class ChatCommands(Protocol):
         self, *, title: str, scope: RetrievalScope
     ) -> ChatSessionRecord: ...
 
-    async def start(self, *, session_id: UUID, question: str) -> UUID: ...
+    async def start(
+        self,
+        *,
+        session_id: UUID,
+        question: str,
+        retrieval_mode: RetrievalMode = "auto",
+    ) -> UUID: ...
+
+
+class ChatHistory(Protocol):
+    async def get_session(self, session_id: UUID) -> ChatSessionRecord | None: ...
+
+    async def list_sessions(self, *, limit: int = 100) -> list[ChatSessionRecord]: ...
+
+    async def list_messages(self, session_id: UUID) -> list[ChatMessageRecord]: ...
+
+    async def get_latest_run(self, session_id: UUID) -> ChatRunRecord | None: ...
 
 
 class CreateChatSessionRequest(BaseModel):
@@ -39,6 +64,7 @@ class ChatSessionResponse(BaseModel):
 
 class CreateChatMessageRequest(BaseModel):
     question: str = Field(min_length=1, max_length=20_000)
+    retrieval_mode: RetrievalMode = "auto"
 
 
 class ChatRunAcceptedResponse(BaseModel):
@@ -46,10 +72,44 @@ class ChatRunAcceptedResponse(BaseModel):
     stream_url: str
 
 
+class ChatHistoryMessageResponse(BaseModel):
+    id: UUID
+    role: ChatRole
+    content: dict[str, object]
+    created_at: datetime
+
+
+class ChatHistoryResponse(BaseModel):
+    items: list[ChatHistoryMessageResponse]
+
+
+class ChatSessionSummaryResponse(ChatSessionResponse):
+    created_at: datetime
+    updated_at: datetime
+
+
+class ChatSessionListResponse(BaseModel):
+    items: list[ChatSessionSummaryResponse]
+
+
+class ChatSessionActivityResponse(BaseModel):
+    session_id: UUID
+    run_id: UUID | None = None
+    status: ChatRunStatus | Literal["IDLE"]
+    error_code: str | None = None
+    stream_url: str | None = None
+
+
 def get_chat_stream_service(
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> ChatStream:
     return PersistedChatStream(SqlChatRepository(session))
+
+
+def get_chat_history(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> ChatHistory:
+    return SqlChatRepository(session)
 
 
 def get_chat_commands(request: Request) -> ChatCommands:
@@ -86,6 +146,62 @@ async def create_chat_session(
     )
 
 
+@router.get("/sessions", response_model=ChatSessionListResponse)
+async def list_chat_sessions(
+    history: Annotated[ChatHistory, Depends(get_chat_history)],
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+) -> ChatSessionListResponse:
+    sessions = await history.list_sessions(limit=limit)
+    return ChatSessionListResponse(
+        items=[
+            ChatSessionSummaryResponse(
+                id=session.id,
+                title=session.title,
+                document_ids=list(session.scope.document_ids),
+                created_at=session.created_at,
+                updated_at=session.updated_at,
+            )
+            for session in sessions
+        ]
+    )
+
+
+@router.get(
+    "/sessions/{session_id}/messages",
+    response_model=ChatHistoryResponse,
+)
+async def list_chat_messages(
+    session_id: UUID,
+    history: Annotated[ChatHistory, Depends(get_chat_history)],
+) -> ChatHistoryResponse:
+    if await history.get_session(session_id) is None:
+        raise AppError("CHAT_SESSION_NOT_FOUND", "Chat session was not found")
+    records = await history.list_messages(session_id)
+    return ChatHistoryResponse(items=[_history_message(item) for item in records])
+
+
+@router.get(
+    "/sessions/{session_id}/activity",
+    response_model=ChatSessionActivityResponse,
+)
+async def get_chat_session_activity(
+    session_id: UUID,
+    history: Annotated[ChatHistory, Depends(get_chat_history)],
+) -> ChatSessionActivityResponse:
+    if await history.get_session(session_id) is None:
+        raise AppError("CHAT_SESSION_NOT_FOUND", "Chat session was not found")
+    run = await history.get_latest_run(session_id)
+    if run is None:
+        return ChatSessionActivityResponse(session_id=session_id, status="IDLE")
+    return ChatSessionActivityResponse(
+        session_id=session_id,
+        run_id=run.id,
+        status=run.status,
+        error_code=run.error_code,
+        stream_url=f"/api/v1/chat/runs/{run.id}/stream",
+    )
+
+
 @router.post(
     "/sessions/{session_id}/messages",
     status_code=status.HTTP_202_ACCEPTED,
@@ -98,7 +214,11 @@ async def create_chat_message(
     commands: Annotated[ChatCommands, Depends(get_chat_commands)],
     stream: Annotated[ChatStream, Depends(get_chat_stream_service)],
 ) -> ChatRunAcceptedResponse | StreamingResponse:
-    run_id = await commands.start(session_id=session_id, question=body.question)
+    run_id = await commands.start(
+        session_id=session_id,
+        question=body.question,
+        retrieval_mode=body.retrieval_mode,
+    )
     stream_url = f"/api/v1/chat/runs/{run_id}/stream"
     if "text/event-stream" not in request.headers.get("accept", ""):
         return ChatRunAcceptedResponse(run_id=run_id, stream_url=stream_url)
@@ -114,9 +234,7 @@ async def stream_chat_run(
 ) -> StreamingResponse:
     after_sequence = _last_event_sequence(last_event_id)
     await service.prepare(run_id)
-    return _streaming_response(
-        service.iter_sse(run_id, after_sequence=after_sequence)
-    )
+    return _streaming_response(service.iter_sse(run_id, after_sequence=after_sequence))
 
 
 def _streaming_response(content: AsyncIterator[str]) -> StreamingResponse:
@@ -146,3 +264,25 @@ def _last_event_sequence(value: str | None) -> int:
             "INVALID_LAST_EVENT_ID", "Last-Event-ID must be a non-negative integer"
         )
     return sequence
+
+
+def _history_message(record: ChatMessageRecord) -> ChatHistoryMessageResponse:
+    if record.role == "user":
+        text = record.content.get("text")
+        if not isinstance(text, str):
+            raise AppError("CHAT_HISTORY_INVALID", "Stored chat history is invalid")
+        content: dict[str, object] = {"text": text}
+    else:
+        try:
+            answer = VerifiedAnswer.model_validate(record.content)
+        except ValueError:
+            raise AppError(
+                "CHAT_HISTORY_INVALID", "Stored chat history is invalid"
+            ) from None
+        content = answer_payload(answer)
+    return ChatHistoryMessageResponse(
+        id=record.id,
+        role=record.role,
+        content=content,
+        created_at=record.created_at,
+    )

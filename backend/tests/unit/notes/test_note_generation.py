@@ -86,9 +86,7 @@ def generated_content(chunk_id: UUID) -> PaperNoteContent:
                 key=key,
                 title=title,
                 markdown=("" if key == "user_comments" else f"Evidence for {key}"),
-                evidence_chunk_ids=(
-                    [] if key == "user_comments" else [chunk_id]
-                ),
+                evidence_chunk_ids=([] if key == "user_comments" else [chunk_id]),
                 status=("USER_CONFIRMED" if key == "user_comments" else "AI_GENERATED"),
             )
             for key, title in NOTE_TEMPLATE
@@ -193,7 +191,9 @@ async def test_generation_rejects_model_authored_user_comments() -> None:
     )
     generated = generated_content(candidate.chunk_id)
     generated.field("user_comments").markdown = "The model should not write this."
-    service = NoteService(FakeLLM(generated), FakeRetrieval(candidate), FakeRepository())
+    service = NoteService(
+        FakeLLM(generated), FakeRetrieval(candidate), FakeRepository()
+    )
 
     with pytest.raises(AppError) as captured:
         await service.generate_draft(document_id, activate_if_new=True)

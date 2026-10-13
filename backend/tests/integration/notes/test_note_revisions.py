@@ -153,6 +153,8 @@ async def test_note_revisions_survive_restart_and_regeneration_is_non_destructiv
         await session.execute(
             delete(PaperNoteModel).where(PaperNoteModel.document_id == document_id)
         )
-        await session.execute(delete(DocumentModel).where(DocumentModel.id == document_id))
+        await session.execute(
+            delete(DocumentModel).where(DocumentModel.id == document_id)
+        )
         await session.commit()
     await restarted_engine.dispose()

@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from research_agent.config import Settings, get_settings
 from research_agent.ingestion.chunker import StructuralChunker
-from research_agent.ingestion.docling_parser import DoclingDocumentParser
+from research_agent.ingestion.pdf_parser import AdaptivePdfDocumentParser
 from research_agent.ingestion.pipeline import IngestionPipeline
 from research_agent.papers.repository import SqlPaperRepository
 from research_agent.papers.storage import MinioObjectStorage
@@ -60,7 +60,7 @@ def _build_pipeline(
     papers = SqlPaperRepository(session)
     tasks = SqlTaskRepository(session)
     storage = MinioObjectStorage.from_settings(settings)
-    parser = DoclingDocumentParser()
+    parser = AdaptivePdfDocumentParser()
     chunker = StructuralChunker()
     embeddings = SqlEmbeddingRepository(session)
     provider = build_openai_embedding_provider(settings)

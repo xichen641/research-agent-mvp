@@ -385,9 +385,9 @@ async def test_duplicate_sanitized_image_ids_fail_before_artifact_upload() -> No
     tasks = FakeTasks()
 
     with pytest.raises(AppError) as error:
-        await IngestionPipeline(
-            FakeParser(parsed), storage, papers, tasks
-        ).parse(VERSION_ID)
+        await IngestionPipeline(FakeParser(parsed), storage, papers, tasks).parse(
+            VERSION_ID
+        )
 
     assert error.value.code == "PARSE_ARTIFACT_ID_COLLISION"
     assert error.value.message == "Parsed image identifiers are not unique"
@@ -421,7 +421,9 @@ class IntermediateUploadFailureStorage(FakeStorage):
 
 
 @pytest.mark.asyncio
-async def test_intermediate_upload_failure_cleans_and_persists_sanitized_failure() -> None:
+async def test_intermediate_upload_failure_cleans_and_persists_sanitized_failure() -> (
+    None
+):
     storage = IntermediateUploadFailureStorage()
     parser = FakeParser(parsed_document())
     papers = FakePapers()
@@ -536,9 +538,7 @@ async def test_task_read_failure_is_sanitized_and_rolled_back() -> None:
         pytest.param(FailingRollbackPapers(), FakeTasks(), id="rollback"),
         pytest.param(FailingMarkPapers(), FakeTasks(), id="mark-failed"),
         pytest.param(FakePapers(), FailingFailureTaskUpdate(), id="task-update"),
-        pytest.param(
-            FailingFailureCommitPapers(), FakeTasks(), id="failure-commit"
-        ),
+        pytest.param(FailingFailureCommitPapers(), FakeTasks(), id="failure-commit"),
     ],
 )
 @pytest.mark.asyncio
@@ -587,9 +587,7 @@ class FailingReadStream(TrackingStream):
     def read(self, size: int | None = -1) -> bytes:
         del size
         self.read_threads.append(threading.get_ident())
-        raise OSError(
-            "https://minio.internal token=secret C:/private/source.pdf"
-        )
+        raise OSError("https://minio.internal token=secret C:/private/source.pdf")
 
 
 class DownloadFailureStorage(FakeStorage):
@@ -698,9 +696,7 @@ async def test_empty_and_dot_only_image_ids_use_stable_non_traversal_names() -> 
         base.page_count,
     )
     storage = ReusableStorage()
-    pipeline = IngestionPipeline(
-        FakeParser(parsed), storage, FakePapers(), FakeTasks()
-    )
+    pipeline = IngestionPipeline(FakeParser(parsed), storage, FakePapers(), FakeTasks())
 
     first = await pipeline.parse(VERSION_ID)
     second = await pipeline.parse(VERSION_ID)

@@ -13,16 +13,18 @@ from research_agent.retrieval.domain import (
 
 ChatIntent = Literal["fact", "summary", "compare_methods", "background"]
 ChatRole = Literal["user", "assistant"]
-ChatRunStatus = Literal["RUNNING", "SUCCEEDED", "FAILED"]
+ChatRunStatus = Literal["QUEUED", "RUNNING", "SUCCEEDED", "FAILED"]
+RetrievalMode = Literal["auto", "off", "on"]
 
 
 class QueryPlan(BaseModel):
     intent: ChatIntent
     original_query: str
-    lexical_queries: tuple[str, ...]
-    semantic_query: str
+    lexical_queries: tuple[str, ...] = ()
+    semantic_query: str = ""
+    needs_retrieval: bool = True
 
-    @field_validator("original_query", "semantic_query")
+    @field_validator("original_query")
     @classmethod
     def reject_blank_query(cls, value: str) -> str:
         if not value.strip():
@@ -32,8 +34,8 @@ class QueryPlan(BaseModel):
     @field_validator("lexical_queries")
     @classmethod
     def reject_blank_lexical_queries(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        if not value or any(not query.strip() for query in value):
-            raise ValueError("lexical queries must not be empty or blank")
+        if any(not query.strip() for query in value):
+            raise ValueError("lexical queries must not contain blank values")
         return value
 
 
@@ -94,7 +96,9 @@ class AnswerDraft(BaseModel):
 
     @field_validator("blocks")
     @classmethod
-    def reject_empty_answer(cls, value: list[DraftAnswerBlock]) -> list[DraftAnswerBlock]:
+    def reject_empty_answer(
+        cls, value: list[DraftAnswerBlock]
+    ) -> list[DraftAnswerBlock]:
         if not value:
             raise ValueError("answer draft must contain at least one block")
         return value
@@ -138,11 +142,51 @@ class VerifiedAnswer(BaseModel):
         return "\n\n".join(block.text for block in self.blocks)
 
 
+class GeneralAnswer(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(min_length=1, max_length=20_000)
+
+    @field_validator("text")
+    @classmethod
+    def reject_blank_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("general answer must not be blank")
+        return value
+
+
+class ConversationMemoryDraft(BaseModel):
+    """A compact, non-authoritative projection of earlier conversation turns."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str = Field(min_length=1, max_length=20_000)
+    durable_facts: list[str] = Field(default_factory=list, max_length=50)
+
+    @field_validator("summary")
+    @classmethod
+    def reject_blank_summary(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("memory summary must not be blank")
+        return value.strip()
+
+    @field_validator("durable_facts")
+    @classmethod
+    def normalize_facts(cls, value: list[str]) -> list[str]:
+        normalized = [item.strip() for item in value if item.strip()]
+        return list(dict.fromkeys(normalized))
+
+
 class ChatGraphState(TypedDict):
     session_id: UUID
     run_id: UUID
     question: str
     scope: RetrievalScope
+    retrieval_mode: RetrievalMode
+    history_message_count: int
+    context: NotRequired[list[dict[str, str]]]
+    memory_summary: NotRequired[str]
+    memory_compacted: NotRequired[bool]
     plan: NotRequired[QueryPlan]
     evidence: NotRequired[list[RetrievalCandidate]]
     evidence_sufficient: NotRequired[bool]
@@ -177,6 +221,10 @@ class ChatRunRecord:
     error_code: str | None
     created_at: datetime
     completed_at: datetime | None
+    question: str | None = None
+    scope: RetrievalScope | None = None
+    retrieval_mode: RetrievalMode = "auto"
+    history_message_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,3 +248,15 @@ class PreparedChatRun:
     session_id: UUID
     question: str
     scope: RetrievalScope
+    retrieval_mode: RetrievalMode = "auto"
+    history_message_count: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationMemoryRecord:
+    session_id: UUID
+    summary: str
+    durable_facts: tuple[str, ...]
+    covered_message_count: int
+    revision: int
+    updated_at: datetime

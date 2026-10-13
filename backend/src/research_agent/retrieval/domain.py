@@ -7,6 +7,10 @@ class RetrievalScope:
     document_ids: tuple[UUID, ...] = ()
 
     def __post_init__(self) -> None:
+        # Checkpoint serializers reconstruct sequence fields from msgpack arrays.
+        # Normalize at the domain boundary so resumed graph state retains the tuple
+        # invariant declared by this value object.
+        object.__setattr__(self, "document_ids", tuple(self.document_ids))
         if len(set(self.document_ids)) != len(self.document_ids):
             raise ValueError("document scope contains duplicates")
 

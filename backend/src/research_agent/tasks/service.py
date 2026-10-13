@@ -27,10 +27,7 @@ RETRYABLE_ERROR_CODES = frozenset(
 
 
 def is_retryable(task: TaskRecord) -> bool:
-    return (
-        task.status is TaskStatus.FAILED
-        and task.error_code in RETRYABLE_ERROR_CODES
-    )
+    return task.status is TaskStatus.FAILED and task.error_code in RETRYABLE_ERROR_CODES
 
 
 class TaskService:

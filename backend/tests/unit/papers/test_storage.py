@@ -149,7 +149,9 @@ def test_presign_uses_public_client_without_changing_internal_storage_client() -
     assert url == "https://example.test/presigned"
 
 
-def test_from_settings_presigns_for_browser_without_contacting_public_endpoint() -> None:
+def test_from_settings_presigns_for_browser_without_contacting_public_endpoint() -> (
+    None
+):
     settings = Settings(
         minio_endpoint="minio:9000",
         minio_public_endpoint="localhost:9000",

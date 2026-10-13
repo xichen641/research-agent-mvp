@@ -25,7 +25,7 @@ export class ApiProblem extends Error {
   }
 }
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
 const SAFE_DETAIL_KEYS = new Set(["field", "reason", "limit"]);
 
 export async function apiRequest<T>(

@@ -53,9 +53,7 @@ def upgrade() -> None:
     op.create_table(
         "chunk_embedding",
         sa.Column("chunk_id", postgresql.UUID(as_uuid=True), nullable=False),
-        sa.Column(
-            "embedding_space_id", postgresql.UUID(as_uuid=True), nullable=False
-        ),
+        sa.Column("embedding_space_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("embedding", Vector(1536), nullable=False),
         sa.Column(
             "created_at",

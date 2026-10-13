@@ -397,19 +397,13 @@ class IngestionPipeline:
                     parsed.markdown.encode("utf-8"),
                     "text/markdown; charset=utf-8",
                 )
-                for image, image_key in zip(
-                    parsed.images, image_keys, strict=True
-                ):
-                    await self._put(
-                        image_key, image.content, image.content_type
-                    )
+                for image, image_key in zip(parsed.images, image_keys, strict=True):
+                    await self._put(image_key, image.content, image.content_type)
 
             failure_code = "PARSE_PERSISTENCE_FAILED"
             failure_message = "Parse result could not be persisted"
             version_status = (
-                VersionStatus.NEEDS_REVIEW
-                if needs_review
-                else VersionStatus.PROCESSING
+                VersionStatus.NEEDS_REVIEW if needs_review else VersionStatus.PROCESSING
             )
             document_status = (
                 DocumentStatus.NEEDS_REVIEW
@@ -439,9 +433,7 @@ class IngestionPipeline:
                 )
             await self._papers.commit()
             return (
-                ParseResult(
-                    report, json_key, markdown_key, image_keys, needs_review
-                ),
+                ParseResult(report, json_key, markdown_key, image_keys, needs_review),
                 parsed,
             )
         except Exception as error:
@@ -450,9 +442,7 @@ class IngestionPipeline:
                 if isinstance(error, AppError)
                 else AppError(failure_code, failure_message, retryable=True)
             )
-            await self._persist_failure_state(
-                version_id, task.id, application_error
-            )
+            await self._persist_failure_state(version_id, task.id, application_error)
             raise application_error from error
 
     async def _update_running(
@@ -543,17 +533,11 @@ class IngestionPipeline:
                 shutil.copyfileobj(stream, output)
 
     async def _put(self, key: str, content: bytes, content_type: str) -> None:
-        await asyncio.to_thread(
-            self._put_content, key, content, content_type
-        )
+        await asyncio.to_thread(self._put_content, key, content, content_type)
 
-    def _put_content(
-        self, key: str, content: bytes, content_type: str
-    ) -> None:
+    def _put_content(self, key: str, content: bytes, content_type: str) -> None:
         with BytesIO(content) as stream:
-            self._storage.put(
-                key=key, stream=stream, content_type=content_type
-            )
+            self._storage.put(key=key, stream=stream, content_type=content_type)
 
 
 def _quality_report(parsed: ParsedDocument) -> ParseQualityReport:

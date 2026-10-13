@@ -14,4 +14,6 @@ COPY backend/README.md ./README.md
 COPY backend/alembic.ini ./alembic.ini
 COPY backend/migrations ./migrations
 RUN uv sync --frozen --no-dev
-CMD ["uv", "run", "--no-dev", "uvicorn", "research_agent.main:app", "--host", "0.0.0.0", "--port", "8000"]
+RUN useradd --create-home --uid 10001 researchagent
+USER researchagent
+CMD ["/app/.venv/bin/uvicorn", "research_agent.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -5,6 +5,8 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { createChatSession } from "@/features/chat/api";
+import { ArxivSearch } from "@/features/discovery/arxiv-search";
+import type { ArxivImportReceipt } from "@/features/discovery/types";
 import {
   documentPdfUrl,
   listDocuments,
@@ -132,6 +134,15 @@ export default function PapersPage() {
     }
   }
 
+  async function receiveArxivImport(receipt: ArxivImportReceipt) {
+    await receiveUpload({
+      documentId: receipt.documentId,
+      versionId: receipt.documentVersionId,
+      taskId: receipt.taskId,
+      duplicate: receipt.duplicate,
+    });
+  }
+
   async function loadMore() {
     if (!nextCursor || loadingMore) return;
     setLoadingMore(true);
@@ -207,6 +218,8 @@ export default function PapersPage() {
           <Metric label="可研究" value={readyCount} tone="emerald" />
           <Metric label="处理中" value={activeCount} tone="blue" />
         </section>
+
+        <ArxivSearch onImported={receiveArxivImport} />
 
         <section
           aria-labelledby="retrieval-chat-title"

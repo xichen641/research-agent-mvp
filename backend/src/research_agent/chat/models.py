@@ -10,6 +10,7 @@ from sqlalchemy import (
     String,
     Text,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PostgreSQLUUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -54,10 +55,24 @@ class ChatRunModel(Base):
     __tablename__ = "chat_run"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('RUNNING', 'SUCCEEDED', 'FAILED')",
+            "status IN ('QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED')",
             name="ck_chat_run_status",
         ),
+        CheckConstraint(
+            "retrieval_mode IN ('auto', 'off', 'on')",
+            name="ck_chat_run_retrieval_mode",
+        ),
+        CheckConstraint(
+            "history_message_count >= 0",
+            name="ck_chat_run_history_message_count",
+        ),
         Index("ix_chat_run_session_created", "session_id", "created_at", "id"),
+        Index(
+            "uq_chat_run_one_active_per_session",
+            "session_id",
+            unique=True,
+            postgresql_where=text("status IN ('QUEUED', 'RUNNING')"),
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
@@ -67,6 +82,13 @@ class ChatRunModel(Base):
     )
     status: Mapped[str] = mapped_column(String(16))
     error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    question: Mapped[str | None] = mapped_column(Text, nullable=True)
+    scope: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)
+    retrieval_mode: Mapped[str] = mapped_column(String(16), default="auto")
+    history_message_count: Mapped[int] = mapped_column(Integer, default=0)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -91,4 +113,28 @@ class ChatRunEventModel(Base):
     payload: Mapped[dict[str, object]] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class ChatMemoryModel(Base):
+    __tablename__ = "chat_memory"
+    __table_args__ = (
+        CheckConstraint(
+            "covered_message_count >= 0",
+            name="ck_chat_memory_covered_message_count",
+        ),
+        CheckConstraint("revision > 0", name="ck_chat_memory_revision"),
+    )
+
+    session_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("chat_session.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    summary: Mapped[str] = mapped_column(Text)
+    durable_facts: Mapped[list[str]] = mapped_column(JSONB)
+    covered_message_count: Mapped[int] = mapped_column(Integer)
+    revision: Mapped[int] = mapped_column(Integer)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )

@@ -226,7 +226,12 @@ async def test_document_cursor_rejection_and_sanitized_detail(
         "created_at": version.created_at.isoformat().replace("+00:00", "Z"),
     }
     serialized = detail.text.lower()
-    for secret in ("source_object_key", "parser_name", "parser_version", "parse_quality"):
+    for secret in (
+        "source_object_key",
+        "parser_name",
+        "parser_version",
+        "parse_quality",
+    ):
         assert secret not in serialized
     assert "private" not in serialized
 

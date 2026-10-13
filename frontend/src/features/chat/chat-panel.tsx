@@ -3,22 +3,29 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import { CitationPanel } from "./citation-panel";
-import type { ChatMessage, Citation, WorkflowUpdate } from "./types";
+import type {
+  ChatMessage,
+  Citation,
+  RetrievalMode,
+  WorkflowUpdate,
+} from "./types";
 
 type ChatPanelProps = {
   messages: ChatMessage[];
   workflow?: WorkflowUpdate | null;
   warnings?: string[];
   busy?: boolean;
-  onSubmit?: (question: string) => Promise<void> | void;
+  onSubmit?: (
+    question: string,
+    retrievalMode: RetrievalMode,
+  ) => Promise<void> | void;
 };
 
-const STAGE_LABELS: Record<WorkflowUpdate["stage"], string> = {
+const STAGE_LABELS: Record<Exclude<WorkflowUpdate["stage"], "answer">, string> = {
   plan: "正在分析问题",
   retrieval: "正在检索候选片段",
   rerank: "正在重排证据",
   citation_verification: "正在检查引用",
-  answer: "回答生成失败",
 };
 
 export function ChatPanel({
@@ -29,6 +36,7 @@ export function ChatPanel({
   onSubmit,
 }: ChatPanelProps) {
   const [question, setQuestion] = useState("");
+  const [retrievalMode, setRetrievalMode] = useState<RetrievalMode>("auto");
   const formRef = useRef<HTMLFormElement>(null);
   const [selectedCitationId, setSelectedCitationId] = useState<string | null>(
     null,
@@ -52,7 +60,7 @@ export function ChatPanel({
     const value = question.trim();
     if (!value || !onSubmit || busy) return;
     setQuestion("");
-    await onSubmit(value);
+    await onSubmit(value, retrievalMode);
   }
 
   return (
@@ -67,7 +75,7 @@ export function ChatPanel({
                 : "bg-blue-50 text-blue-800"
             }`}
           >
-            {STAGE_LABELS[workflow.stage]}
+            {workflowLabel(workflow)}
           </p>
         )}
 
@@ -163,8 +171,28 @@ export function ChatPanel({
             ref={formRef}
             onSubmit={submit}
             data-hydrated="false"
-            className="mt-6 flex gap-3"
+            className="mt-6 space-y-3"
           >
+            <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+              <label htmlFor="retrieval-mode" className="text-sm font-medium text-slate-700">
+                本轮论文检索
+              </label>
+              <select
+                id="retrieval-mode"
+                value={retrievalMode}
+                disabled={busy}
+                onChange={(event) => setRetrievalMode(event.target.value as RetrievalMode)}
+                className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 outline-none focus:border-blue-500"
+              >
+                <option value="auto">自动判断</option>
+                <option value="off">不检索，仅继续讨论</option>
+                <option value="on">强制检索选定论文</option>
+              </select>
+              <span className="text-xs text-slate-500">
+                Memory 用于延续上下文，只有检索结果可以作为论文证据。
+              </span>
+            </div>
+            <div className="flex gap-3">
             <label htmlFor="chat-question" className="sr-only">
               研究问题
             </label>
@@ -184,6 +212,7 @@ export function ChatPanel({
             >
               {busy ? "处理中" : "发送"}
             </button>
+            </div>
           </form>
         )}
       </section>
@@ -202,4 +231,11 @@ export function ChatPanel({
       </div>
     </div>
   );
+}
+
+function workflowLabel(workflow: WorkflowUpdate): string {
+  if (workflow.stage === "answer") {
+    return workflow.status === "failed" ? "回答生成失败" : "正在组织引用回答";
+  }
+  return STAGE_LABELS[workflow.stage];
 }

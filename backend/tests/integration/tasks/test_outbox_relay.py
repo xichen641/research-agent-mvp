@@ -6,11 +6,16 @@ from uuid import UUID, uuid4
 from celery import Celery
 from fastapi import FastAPI
 import pytest
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from research_agent.chat.domain import RetrievalScope
+from research_agent.chat.models import ChatRunModel, ChatSessionModel
+from research_agent.chat.repository import SqlChatRepository
 from research_agent.main import create_app, run_outbox_relay_pass
 from research_agent.papers.models import OutboxEventModel
 from research_agent.tasks.outbox_relay import OutboxRelay, SqlOutboxRepository
+from research_agent.tasks.recovery import SqlChatRunRecovery
 
 
 class RecordingSender:
@@ -36,13 +41,14 @@ async def add_event(
     available_at: datetime | None = None,
     sent_at: datetime | None = None,
     payload: dict[str, object] | None = None,
+    event_type: str = "document.uploaded",
 ) -> tuple[UUID, str]:
     event_id = uuid4()
     version_id = str(uuid4())
     session.add(
         OutboxEventModel(
             id=event_id,
-            event_type="document.uploaded",
+            event_type=event_type,
             payload=payload or {"version_id": version_id},
             attempts=0,
             available_at=available_at or datetime.now(UTC),
@@ -109,6 +115,33 @@ async def test_nested_payload_cannot_override_fixed_ingestion_routing(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_chat_run_event_uses_allowlisted_chat_worker_route(
+    db_session: AsyncSession,
+) -> None:
+    run_id = str(uuid4())
+    await add_event(
+        db_session,
+        event_type="chat.run.requested",
+        payload={
+            "task_name": "untrusted.task",
+            "queue": "untrusted_queue",
+            "run_id": run_id,
+        },
+    )
+    sender = RecordingSender()
+
+    assert await OutboxRelay(SqlOutboxRepository(db_session), sender).run_once() == 1
+    assert sender.calls == [
+        (
+            "research_agent.chat.process_run",
+            {"run_id": run_id},
+            "chat_generation",
+        )
+    ]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_send_failure_increments_attempts_and_leaves_event_unsent(
     db_session: AsyncSession,
 ) -> None:
@@ -134,9 +167,7 @@ async def test_future_event_is_not_selected(db_session: AsyncSession) -> None:
     )
     sender = RecordingSender()
 
-    assert await OutboxRelay(
-        SqlOutboxRepository(db_session), sender
-    ).run_once() == 0
+    assert await OutboxRelay(SqlOutboxRepository(db_session), sender).run_once() == 0
     assert sender.calls == []
     persisted = await db_session.get(OutboxEventModel, event_id)
     assert persisted is not None
@@ -157,12 +188,8 @@ async def test_concurrent_claimers_do_not_send_the_same_event(
         independent_session_factory() as second_session,
     ):
         sent_counts = await asyncio.gather(
-            OutboxRelay(
-                SqlOutboxRepository(first_session), sender
-            ).run_once(),
-            OutboxRelay(
-                SqlOutboxRepository(second_session), sender
-            ).run_once(),
+            OutboxRelay(SqlOutboxRepository(first_session), sender).run_once(),
+            OutboxRelay(SqlOutboxRepository(second_session), sender).run_once(),
         )
 
     assert sum(sent_counts) == 1
@@ -173,6 +200,76 @@ async def test_concurrent_claimers_do_not_send_the_same_event(
             "paper_ingestion",
         )
     ]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_expired_chat_lease_is_requeued_with_a_fresh_outbox_event(
+    independent_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with independent_session_factory() as seed_session:
+        chats = SqlChatRepository(seed_session)
+        chat_session = await chats.create_session(
+            title="Recover lost worker",
+            scope=RetrievalScope(),
+        )
+        run = await chats.start_run(
+            session_id=chat_session.id,
+            question="Resume this turn",
+            dispatch=True,
+        )
+        original = (
+            await seed_session.scalars(
+                select(OutboxEventModel).where(
+                    OutboxEventModel.event_type == "chat.run.requested",
+                    OutboxEventModel.payload["run_id"].as_string() == str(run.id),
+                )
+            )
+        ).one()
+        original.sent_at = datetime.now(UTC)
+        await seed_session.commit()
+        claimed = await chats.claim_run(run.id, lease=timedelta(seconds=1))
+        assert claimed is not None
+        await chats.record_event(
+            run_id=run.id,
+            event_type="worker_heartbeat",
+            payload={},
+        )
+        renewed = await seed_session.get(ChatRunModel, run.id)
+        assert renewed is not None
+        assert renewed.lease_expires_at is not None
+        assert renewed.lease_expires_at > datetime.now(UTC) + timedelta(minutes=20)
+        renewed.lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        await seed_session.commit()
+
+    async with independent_session_factory() as recovery_session:
+        recovered_count = await SqlChatRunRecovery(recovery_session).requeue_expired()
+        recovered = await recovery_session.get(ChatRunModel, run.id)
+        outbox = (
+            await recovery_session.scalars(
+                select(OutboxEventModel).where(
+                    OutboxEventModel.event_type == "chat.run.requested",
+                    OutboxEventModel.payload["run_id"].as_string() == str(run.id),
+                )
+            )
+        ).all()
+
+        assert recovered_count == 1
+        assert recovered is not None
+        assert recovered.status == "QUEUED"
+        assert recovered.lease_expires_at is None
+        assert len(outbox) == 2
+        assert sum(event.sent_at is None for event in outbox) == 1
+
+        await recovery_session.execute(
+            delete(OutboxEventModel).where(
+                OutboxEventModel.id.in_([e.id for e in outbox])
+            )
+        )
+        await recovery_session.execute(
+            delete(ChatSessionModel).where(ChatSessionModel.id == chat_session.id)
+        )
+        await recovery_session.commit()
 
 
 class FailingSession:

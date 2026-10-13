@@ -6,6 +6,7 @@ from research_agent.chat.domain import (
     ChatRunResult,
     ChatSessionRecord,
     PreparedChatRun,
+    RetrievalMode,
     RetrievalScope,
     VerifiedAnswer,
 )
@@ -23,22 +24,41 @@ class ChatService:
     ) -> ChatSessionRecord:
         return await self._repository.create_session(title=title, scope=scope)
 
-    async def ask(self, session_id: UUID, question: str) -> ChatRunResult:
-        prepared = await self.prepare(session_id, question)
+    async def ask(
+        self,
+        session_id: UUID,
+        question: str,
+        *,
+        retrieval_mode: RetrievalMode = "auto",
+    ) -> ChatRunResult:
+        prepared = await self.prepare(
+            session_id, question, retrieval_mode=retrieval_mode
+        )
         return await self.execute(prepared)
 
-    async def prepare(self, session_id: UUID, question: str) -> PreparedChatRun:
+    async def prepare(
+        self,
+        session_id: UUID,
+        question: str,
+        *,
+        retrieval_mode: RetrievalMode = "auto",
+    ) -> PreparedChatRun:
         session = await self._repository.get_session(session_id)
         if session is None:
             raise ChatSessionNotFoundError(f"chat session {session_id} does not exist")
         run = await self._repository.start_run(
-            session_id=session_id, question=question
+            session_id=session_id,
+            question=question,
+            scope=session.scope,
+            retrieval_mode=retrieval_mode,
         )
         return PreparedChatRun(
             run_id=run.id,
             session_id=session_id,
             question=question,
             scope=session.scope,
+            retrieval_mode=retrieval_mode,
+            history_message_count=run.history_message_count,
         )
 
     async def execute(self, prepared: PreparedChatRun) -> ChatRunResult:
@@ -49,6 +69,8 @@ class ChatService:
                     "run_id": prepared.run_id,
                     "question": prepared.question,
                     "scope": prepared.scope,
+                    "retrieval_mode": prepared.retrieval_mode,
+                    "history_message_count": prepared.history_message_count,
                     "warnings": [],
                 },
                 config={
@@ -62,7 +84,9 @@ class ChatService:
             answer = VerifiedAnswer.model_validate(result["verified_answer"])
             return ChatRunResult(run_id=prepared.run_id, answer=answer)
         except Exception as error:
-            error_code = error.code if isinstance(error, AppError) else "CHAT_RUN_FAILED"
+            error_code = (
+                error.code if isinstance(error, AppError) else "CHAT_RUN_FAILED"
+            )
             await self._repository.fail_run(
                 run_id=prepared.run_id, error_code=error_code
             )

@@ -93,6 +93,28 @@ async def test_service_fuses_candidates_and_returns_reranker_order() -> None:
     assert repository.vector_query == await embeddings.embed_query(query.semantic_query)
 
 
+@pytest.mark.asyncio
+async def test_service_applies_a_workload_specific_default_final_limit() -> None:
+    ids = [uuid4() for _ in range(3)]
+    repository = RecordingRepository(
+        lexical=[candidate(item, lexical_rank=index) for index, item in enumerate(ids, 1)],
+        vector=[],
+    )
+    service = RetrievalService(
+        repository,
+        FakeEmbeddingProvider(dimension=1536),
+        FakeRerankerProvider(
+            scores={str(item): 1 - index / 10 for index, item in enumerate(ids)}
+        ),
+        default_final_limit=2,
+    )
+    query = RetrievalQuery("question", ("question",), "question", RetrievalScope())
+
+    result = await service.retrieve(query)
+
+    assert len(result) == 2
+
+
 class UnknownIdReranker:
     model_id = "invalid"
 

@@ -32,7 +32,9 @@ test("upload, refresh, and durable worker failure remain visible", async ({ page
     importDialog.getByText(/上传已受理|论文已存在，已显示原任务/),
   ).toBeVisible();
   await expect(cards).toHaveCount(beforeTextUpload + (brokenPaperAlreadyExists ? 0 : 1));
-  await expect(page.getByText("Source document could not be parsed")).toBeVisible();
+  await expect(
+    existingBrokenPaper.getByText("Source document could not be parsed"),
+  ).toBeVisible();
   await expect(
     page.getByRole("button", { name: "选择 task8-broken" }).getByText("失败", { exact: true }),
   ).toBeVisible();

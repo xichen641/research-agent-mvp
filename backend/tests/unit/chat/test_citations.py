@@ -109,9 +109,7 @@ def test_candidate_requires_positive_ordered_page_range(candidate_factory) -> No
     candidate = candidate_factory(page_start=0, page_end=0)
 
     result = CitationVerifier().verify(
-        citations=[
-            CitationDraft(chunk_id=candidate.chunk_id, quote=candidate.content)
-        ],
+        citations=[CitationDraft(chunk_id=candidate.chunk_id, quote=candidate.content)],
         candidates=[candidate],
     )
 

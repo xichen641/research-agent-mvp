@@ -11,11 +11,23 @@ from research_agent.shared.ids import EntityId
 
 INGESTION_TASK_NAME = "research_agent.ingestion.process_document"
 INGESTION_QUEUE = "paper_ingestion"
+CHAT_TASK_NAME = "research_agent.chat.process_run"
+CHAT_QUEUE = "chat_generation"
+OUTBOX_ROUTES = {
+    "document.uploaded": (INGESTION_TASK_NAME, INGESTION_QUEUE, "version_id"),
+    "document.retry_requested": (
+        INGESTION_TASK_NAME,
+        INGESTION_QUEUE,
+        "version_id",
+    ),
+    "chat.run.requested": (CHAT_TASK_NAME, CHAT_QUEUE, "run_id"),
+}
 
 
 @dataclass(frozen=True, slots=True)
 class OutboxEventRecord:
     id: EntityId
+    event_type: str
     payload: dict[str, object]
 
 
@@ -52,7 +64,10 @@ class SqlOutboxRepository:
             select(OutboxEventModel)
             .where(
                 OutboxEventModel.sent_at.is_(None),
-                OutboxEventModel.available_at <= func.now(),
+                # PostgreSQL now() is frozen at transaction start. A relay may
+                # hold a transaction while dispatching, so eligibility must use
+                # wall-clock statement time instead.
+                OutboxEventModel.available_at <= func.clock_timestamp(),
             )
             .order_by(OutboxEventModel.available_at, OutboxEventModel.id)
             .limit(limit)
@@ -60,7 +75,11 @@ class SqlOutboxRepository:
         )
         events = (await self._session.scalars(statement)).all()
         return [
-            OutboxEventRecord(id=event.id, payload=event.payload)
+            OutboxEventRecord(
+                id=event.id,
+                event_type=event.event_type,
+                payload=event.payload,
+            )
             for event in events
         ]
 
@@ -99,18 +118,22 @@ class OutboxRelay:
         sent = 0
         for event in events:
             try:
+                route = OUTBOX_ROUTES.get(event.event_type)
+                if route is None:
+                    raise TypeError("outbox event type is not dispatchable")
+                task_name, queue, argument_name = route
                 kwargs = event.payload.get("kwargs")
-                version_id = (
-                    kwargs.get("version_id")
+                argument = (
+                    kwargs.get(argument_name)
                     if isinstance(kwargs, dict)
-                    else event.payload.get("version_id")
+                    else event.payload.get(argument_name)
                 )
-                if not isinstance(version_id, str):
-                    raise TypeError("outbox version_id must be a string")
+                if not isinstance(argument, str):
+                    raise TypeError("outbox route argument must be a string")
                 self._celery.send_task(
-                    INGESTION_TASK_NAME,
-                    kwargs={"version_id": version_id},
-                    queue=INGESTION_QUEUE,
+                    task_name,
+                    kwargs={argument_name: argument},
+                    queue=queue,
                 )
             except Exception:
                 await self._repository.record_failure(event.id)

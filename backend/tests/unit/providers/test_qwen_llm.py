@@ -30,7 +30,12 @@ async def test_qwen_adapter_requests_json_and_validates_typed_output() -> None:
         200,
         {
             "choices": [
-                {"message": {"role": "assistant", "content": '{"label":"ok","count":2}'}}
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": '{"label":"ok","count":2}',
+                    }
+                }
             ]
         },
     )
@@ -54,6 +59,7 @@ async def test_qwen_adapter_requests_json_and_validates_typed_output() -> None:
     payload = call.kwargs["json"]
     assert payload["model"] == "qwen-plus"
     assert payload["response_format"] == {"type": "json_object"}
+    assert payload["enable_thinking"] is False
     assert "JSON" in payload["messages"][0]["content"]
     assert "StructuredResult" in payload["messages"][0]["content"]
 
@@ -62,7 +68,9 @@ async def test_qwen_adapter_requests_json_and_validates_typed_output() -> None:
 @pytest.mark.parametrize("status_code", [408, 429, 500, 503])
 async def test_qwen_adapter_sanitizes_retryable_failures(status_code: int) -> None:
     client = AsyncMock()
-    client.post.return_value = response(status_code, {"message": "private provider detail"})
+    client.post.return_value = response(
+        status_code, {"message": "private provider detail"}
+    )
     provider = QwenLLMProvider(
         client=client,
         base_url="https://dashscope.example/compatible-mode/v1",
@@ -116,15 +124,7 @@ async def test_qwen_adapter_retries_one_transient_failure(first_status: int) -> 
         response(first_status, {"message": "temporary private detail"}),
         response(
             200,
-            {
-                "choices": [
-                    {
-                        "message": {
-                            "content": '{"label":"recovered","count":1}'
-                        }
-                    }
-                ]
-            },
+            {"choices": [{"message": {"content": '{"label":"recovered","count":1}'}}]},
         ),
     ]
     provider = QwenLLMProvider(
@@ -154,11 +154,7 @@ async def test_qwen_adapter_retries_one_invalid_structured_response() -> None:
         ),
         response(
             200,
-            {
-                "choices": [
-                    {"message": {"content": '{"label":"repaired","count":2}'}}
-                ]
-            },
+            {"choices": [{"message": {"content": '{"label":"repaired","count":2}'}}]},
         ),
     ]
     provider = QwenLLMProvider(

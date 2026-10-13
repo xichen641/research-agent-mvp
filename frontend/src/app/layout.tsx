@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { ChatActivityProvider } from "@/features/chat/chat-activity";
 import { WorkspaceShell } from "@/features/workspace/workspace-shell";
 import "./globals.css";
 
@@ -15,7 +16,9 @@ export default function RootLayout({
   return (
     <html lang="zh-CN" className="h-full antialiased">
       <body className="min-h-full">
-        <WorkspaceShell>{children}</WorkspaceShell>
+        <ChatActivityProvider>
+          <WorkspaceShell>{children}</WorkspaceShell>
+        </ChatActivityProvider>
       </body>
     </html>
   );

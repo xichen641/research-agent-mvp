@@ -281,9 +281,7 @@ class SqlPaperRepository:
             )
         )
 
-    async def get_version(
-        self, version_id: EntityId
-    ) -> DocumentVersionRecord | None:
+    async def get_version(self, version_id: EntityId) -> DocumentVersionRecord | None:
         try:
             model = await self._session.get(DocumentVersionModel, version_id)
         except SQLAlchemyError as error:
@@ -601,6 +599,7 @@ def _constraint_name(error: IntegrityError) -> str | None:
 
 
 if TYPE_CHECKING:
+
     def _paper_repository_conformance(
         repository: SqlPaperRepository,
     ) -> PaperRepository:

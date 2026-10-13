@@ -1,17 +1,22 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+
+import { getChatSessionActivity, listChatMessages } from "./api";
+import { useChatActivity } from "./chat-activity";
 
 import type {
   ChatMessage,
   CitationData,
+  RetrievalMode,
   UIStreamPart,
   WorkflowUpdate,
 } from "./types";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
 
 export function useResearchChat(sessionId: string) {
+  const { setActivity } = useChatActivity();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [workflow, setWorkflow] = useState<WorkflowUpdate | null>(null);
   const [warnings, setWarnings] = useState<string[]>([]);
@@ -20,6 +25,7 @@ export function useResearchChat(sessionId: string) {
   const lastEventId = useRef(0);
   const runId = useRef<string | null>(null);
   const assistantMessageId = useRef<string | null>(null);
+  const runFailed = useRef(false);
 
   const consume = useCallback(async (response: Response) => {
     if (!response.ok || !response.body) {
@@ -30,8 +36,23 @@ export function useResearchChat(sessionId: string) {
       if (part === "[DONE]") return;
       if (part.type === "start") {
         runId.current = part.messageId;
+        setActivity({
+          sessionId,
+          runId: part.messageId,
+          status: "RUNNING",
+          updatedAt: new Date().toISOString(),
+        });
       } else if (part.type === "data-workflow") {
         setWorkflow(part.data);
+        if (part.data.status === "failed") {
+          runFailed.current = true;
+          setActivity({
+            sessionId,
+            runId: runId.current,
+            status: "FAILED",
+            updatedAt: new Date().toISOString(),
+          });
+        }
       } else if (part.type === "text-start") {
         assistantMessageId.current = part.id;
         startAssistantMessage(part.id, setMessages);
@@ -48,19 +69,77 @@ export function useResearchChat(sessionId: string) {
           setMessages,
           setWarnings,
         );
+      } else if (part.type === "finish" && !runFailed.current) {
+        setActivity({
+          sessionId,
+          runId: runId.current,
+          status: "SUCCEEDED",
+          updatedAt: new Date().toISOString(),
+        });
       }
     });
-  }, []);
+  }, [sessionId, setActivity]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const restore = async () => {
+      try {
+        const [history, activity] = await Promise.all([
+          listChatMessages(sessionId),
+          getChatSessionActivity(sessionId),
+        ]);
+        if (cancelled) return;
+        setMessages((current) => {
+          const currentIds = new Set(current.map((message) => message.id));
+          return [...history.filter((message) => !currentIds.has(message.id)), ...current];
+        });
+        if (activity.status === "IDLE" || !activity.runId) return;
+        runId.current = activity.runId;
+        runFailed.current = activity.status === "FAILED";
+        setActivity({
+          sessionId,
+          runId: activity.runId,
+          status: activity.status,
+          updatedAt: new Date().toISOString(),
+        });
+        if (activity.status !== "QUEUED" && activity.status !== "RUNNING") return;
+        setBusy(true);
+        setWorkflow({ stage: "plan", status: "running" });
+        const response = await fetch(`${API_URL}${activity.streamUrl}`, {
+          headers: { Accept: "text/event-stream" },
+        });
+        if (cancelled) return;
+        await consume(response);
+      } catch (caught) {
+        if (!cancelled) {
+          setError(caught instanceof Error ? caught.message : "会话恢复失败");
+        }
+      } finally {
+        if (!cancelled) setBusy(false);
+      }
+    };
+    void restore();
+    return () => {
+      cancelled = true;
+    };
+  }, [consume, sessionId, setActivity]);
 
   const send = useCallback(
-    async (question: string) => {
+    async (question: string, retrievalMode: RetrievalMode = "auto") => {
       setBusy(true);
       setError(null);
       setWorkflow({ stage: "plan", status: "running" });
       setWarnings([]);
       lastEventId.current = 0;
       runId.current = null;
+      runFailed.current = false;
       assistantMessageId.current = null;
+      setActivity({
+        sessionId,
+        runId: null,
+        status: "QUEUED",
+        updatedAt: new Date().toISOString(),
+      });
       setMessages((current) => [
         ...current,
         { id: crypto.randomUUID(), role: "user", text: question },
@@ -74,7 +153,10 @@ export function useResearchChat(sessionId: string) {
               Accept: "text/event-stream",
               "Content-Type": "application/json",
             },
-            body: JSON.stringify({ question }),
+            body: JSON.stringify({
+              question,
+              retrieval_mode: retrievalMode,
+            }),
           },
         );
         await consume(response);
@@ -98,11 +180,17 @@ export function useResearchChat(sessionId: string) {
         }
         setError(caught instanceof Error ? caught.message : "聊天请求失败");
         setWorkflow({ stage: "answer", status: "failed" });
+        setActivity({
+          sessionId,
+          runId: runId.current,
+          status: "FAILED",
+          updatedAt: new Date().toISOString(),
+        });
       } finally {
         setBusy(false);
       }
     },
-    [consume, sessionId],
+    [consume, sessionId, setActivity],
   );
 
   return { messages, workflow, warnings, busy, error, send };

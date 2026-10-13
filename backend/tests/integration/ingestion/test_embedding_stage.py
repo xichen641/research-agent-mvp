@@ -132,7 +132,7 @@ def test_embedding_migration_is_single_head() -> None:
     config = Config(str(Path(__file__).parents[3] / "alembic.ini"))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["0006_notes"]
+    assert script.get_heads() == ["0009_durable_chat_runs"]
 
 
 @pytest.mark.integration
@@ -151,12 +151,12 @@ async def test_embedding_schema_has_vector_hnsw_and_cascading_foreign_keys(
 
     embedding = next(column for column in columns if column["name"] == "embedding")
     assert "VECTOR(1536)" in str(embedding["type"]).upper()
-    hnsw = next(index for index in indexes if index["name"] == "ix_chunk_embedding_hnsw")
+    hnsw = next(
+        index for index in indexes if index["name"] == "ix_chunk_embedding_hnsw"
+    )
     dialect_options = hnsw.get("dialect_options", {})
     assert dialect_options["postgresql_using"] == "hnsw"
-    assert dialect_options["postgresql_ops"] == {
-        "embedding": "vector_cosine_ops"
-    }
+    assert dialect_options["postgresql_ops"] == {"embedding": "vector_cosine_ops"}
     assert {foreign_key["referred_table"] for foreign_key in foreign_keys} == {
         "document_chunk",
         "embedding_space",
@@ -189,8 +189,14 @@ async def test_embedding_stage_is_idempotent_excludes_references_and_activates_r
     await pipeline.embed_and_activate(created.version_id)
 
     assert provider.batches == [["first body chunk"], ["second body chunk"]]
-    assert await db_session.scalar(select(func.count()).select_from(EmbeddingSpaceModel)) == 1
-    assert await db_session.scalar(select(func.count()).select_from(ChunkEmbeddingModel)) == 2
+    assert (
+        await db_session.scalar(select(func.count()).select_from(EmbeddingSpaceModel))
+        == 1
+    )
+    assert (
+        await db_session.scalar(select(func.count()).select_from(ChunkEmbeddingModel))
+        == 2
+    )
     document = await db_session.get(DocumentModel, created.document_id)
     version = await db_session.get(DocumentVersionModel, created.version_id)
     task = await db_session.get(DocumentTaskModel, created.task_id)
@@ -229,7 +235,10 @@ async def test_embedding_stage_restarts_from_first_missing_batch_after_provider_
     assert captured.value.message == (
         "Embedding provider could not process document chunks"
     )
-    assert await db_session.scalar(select(func.count()).select_from(ChunkEmbeddingModel)) == 1
+    assert (
+        await db_session.scalar(select(func.count()).select_from(ChunkEmbeddingModel))
+        == 1
+    )
     failed_task = await db_session.get(DocumentTaskModel, created.task_id)
     assert failed_task is not None and failed_task.status == TaskStatus.FAILED
     assert failed_task.error_code == "EMBEDDING_PROVIDER_FAILED"
@@ -241,6 +250,9 @@ async def test_embedding_stage_restarts_from_first_missing_batch_after_provider_
         ["second body chunk"],
         ["second body chunk"],
     ]
-    assert await db_session.scalar(select(func.count()).select_from(ChunkEmbeddingModel)) == 2
+    assert (
+        await db_session.scalar(select(func.count()).select_from(ChunkEmbeddingModel))
+        == 2
+    )
     recovered_task = await db_session.get(DocumentTaskModel, created.task_id)
     assert recovered_task is not None and recovered_task.status == TaskStatus.READY

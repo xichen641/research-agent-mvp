@@ -33,9 +33,7 @@ class DoclingDocumentParser:
         self._converter = DocumentConverter(
             allowed_formats=[InputFormat.PDF],
             format_options={
-                InputFormat.PDF: PdfFormatOption(
-                    pipeline_options=pipeline_options
-                )
+                InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
             },
         )
 
@@ -80,13 +78,9 @@ class DoclingDocumentParser:
                 if isinstance(item, TextItem) and provenance_count > 1:
                     start, end = item.prov[provenance_index].charspan
                     normalized_text = item.text[start:end]
-                page_number, bbox = _provenance(
-                    item, document, provenance_index
-                )
+                page_number, bbox = _provenance(item, document, provenance_index)
                 if page_number == 0:
-                    warnings.append(
-                        f"missing provenance for {normalized_id}"
-                    )
+                    warnings.append(f"missing provenance for {normalized_id}")
                 elements.append(
                     ParsedElement(
                         element_id=normalized_id,
@@ -119,9 +113,7 @@ class DoclingDocumentParser:
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
-        markdown = document.export_to_markdown(
-            image_placeholder="<!-- image -->"
-        )
+        markdown = document.export_to_markdown(image_placeholder="<!-- image -->")
         return ParsedDocument(
             markdown=markdown,
             json_bytes=json_bytes,

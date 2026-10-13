@@ -53,9 +53,7 @@ class FakeEmbeddingProvider:
         block_index = 0
         while len(values) < self.dimension:
             digest = hashlib.sha256(
-                _EMBEDDING_DOMAIN
-                + block_index.to_bytes(8, "big")
-                + text_bytes
+                _EMBEDDING_DOMAIN + block_index.to_bytes(8, "big") + text_bytes
             ).digest()
             values.extend(byte / 255.0 for byte in digest)
             block_index += 1
