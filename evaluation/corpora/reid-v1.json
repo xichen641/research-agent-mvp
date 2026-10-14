@@ -1,0 +1,201 @@
+{
+  "schema_version": 1,
+  "corpus_id": "reid-local",
+  "corpus_version": 1,
+  "reviewed_on": "2026-10-14",
+  "dataset_root": "datasets/Reid",
+  "papers": [
+    {
+      "paper_id": "clip-reid",
+      "display_name": "CLIP-ReID",
+      "file_name": "（一）Li 等 - 2023 - CLIP-ReID Exploiting Vision-Language Model for Image Re-Identification without Concrete Text Labels.pdf",
+      "sha256": "9cde2cb46723cde49bc3a2dbc543546dee3d1b57e9d609c00ef12f880e550dc4",
+      "size_bytes": 3478985,
+      "page_count": 11,
+      "title": "CLIP-ReID: Exploiting Vision-Language Model for Image Re-Identification without Concrete Text Labels",
+      "authors": ["Siyuan Li", "Li Sun", "Qingli Li"],
+      "material_version": {
+        "kind": "arxiv_preprint",
+        "identifier": "arXiv:2211.13977v4",
+        "date": "2023-01-01",
+        "copyright_year_on_pdf": 2023
+      },
+      "source": {
+        "url": "https://arxiv.org/pdf/2211.13977v4",
+        "basis": "pdf_watermark",
+        "original_download_url": null
+      },
+      "publication": {
+        "status": "not_independently_verified",
+        "venue": null,
+        "year": null,
+        "source_url": null
+      },
+      "metadata_review": {
+        "pdf_page": 1,
+        "checked_fields": ["title", "authors", "arxiv_version", "arxiv_date", "copyright_year"],
+        "notes": "以首页标题、作者及 arXiv 水印核对。首页另有 AAAI ©2023；版权标记单独保存，不据此认定本文件为出版终版。"
+      }
+    },
+    {
+      "paper_id": "promptsg",
+      "display_name": "PromptSG",
+      "file_name": "（二）Yang 等 - 2024 - A Pedestrian is Worth One Prompt Towards Language Guidance Person Re- Identification.pdf",
+      "sha256": "5fcd83d6df558ca2f6c48f706180190096fcb6eaf6aeabc2f725accb44fac71c",
+      "size_bytes": 2548449,
+      "page_count": 11,
+      "title": "A Pedestrian is Worth One Prompt: Towards Language Guidance Person Re-Identification",
+      "authors": ["Zexian Yang", "Dayan Wu", "Chenming Wu", "Zheng Lin", "Jingzi Gu", "Weiping Wang"],
+      "material_version": {
+        "kind": "cvf_open_access",
+        "identifier": "CVPR2024-open-access-17343-17353",
+        "date": null,
+        "copyright_year_on_pdf": null
+      },
+      "source": {
+        "url": "https://openaccess.thecvf.com/content/CVPR2024/papers/Yang_A_Pedestrian_is_Worth_One_Prompt_Towards_Language_Guidance_Person_CVPR_2024_paper.pdf",
+        "basis": "publisher_catalog_and_pdf",
+        "original_download_url": null
+      },
+      "publication": {
+        "status": "verified",
+        "venue": "CVPR",
+        "year": 2024,
+        "source_url": "https://openaccess.thecvf.com/content/CVPR2024/html/Yang_A_Pedestrian_is_Worth_One_Prompt_Towards_Language_Guidance_Person_CVPR_2024_paper.html"
+      },
+      "metadata_review": {
+        "pdf_page": 1,
+        "checked_fields": ["title", "authors", "cvf_open_access_watermark", "printed_page_range", "publisher_catalog"],
+        "notes": "首页标明 CVF Open Access 版本；首页印刷页码 17343，末页为 17353。CVF 官方目录确认 CVPR 2024 与页码范围。未把 IEEE Xplore 出版终版或未知 arXiv 版本当成本地材料版本，未比对远端 PDF 字节。"
+      }
+    },
+    {
+      "paper_id": "mp-reid",
+      "display_name": "MP-ReID",
+      "file_name": "（三）Zhai 等 - 2024 - Multi-Prompts Learning with Cross-Modal Alignment for Attribute-Based Person Re-identification.pdf",
+      "sha256": "d2532790b885ab0e0532de92b8bfdcfe079d1419becc2ec796b29284fbe3c1f0",
+      "size_bytes": 867812,
+      "page_count": 9,
+      "title": "Multi-Prompts Learning with Cross-Modal Alignment for Attribute-based Person Re-Identification",
+      "authors": ["Yajing Zhai", "Yawen Zeng", "Zhiyong Huang", "Zheng Qin", "Xin Jin", "Da Cao"],
+      "material_version": {
+        "kind": "arxiv_preprint",
+        "identifier": "arXiv:2312.16797v1",
+        "date": "2023-12-28",
+        "copyright_year_on_pdf": 2024
+      },
+      "source": {
+        "url": "https://arxiv.org/pdf/2312.16797v1",
+        "basis": "pdf_watermark",
+        "original_download_url": null
+      },
+      "publication": {
+        "status": "not_independently_verified",
+        "venue": null,
+        "year": null,
+        "source_url": null
+      },
+      "metadata_review": {
+        "pdf_page": 1,
+        "checked_fields": ["title", "authors", "method_name_in_abstract", "arxiv_version", "arxiv_date", "copyright_year"],
+        "notes": "摘要明确方法名 MP-ReID。文件名年份为 2024，但首页水印是 2023-12-28 的 arXiv v1；另有 AAAI ©2024。预印本日期与版权年份分别记录，未以文件名推断材料版本。"
+      }
+    },
+    {
+      "paper_id": "clip-scgi",
+      "display_name": "CLIP-SCGI",
+      "file_name": "（四）Han 等 - 2024 - CLIP-SCGI Synthesized Caption-Guided Inversion for Person Re-Identification.pdf",
+      "sha256": "6a35e8acf4b0acac5e2b996d2e96ebd8847829244dd10a776e47fd45e2c7435a",
+      "size_bytes": 4354056,
+      "page_count": 11,
+      "title": "CLIP-SCGI: Synthesized Caption-Guided Inversion for Person Re-Identification",
+      "authors": ["Qianru Han", "Xinwei He", "Zhi Liu", "Sannyuya Liu", "Ying Zhang", "Jinhai Xiang"],
+      "material_version": {
+        "kind": "arxiv_preprint",
+        "identifier": "arXiv:2410.09382v1",
+        "date": "2024-10-12",
+        "copyright_year_on_pdf": null
+      },
+      "source": {
+        "url": "https://arxiv.org/pdf/2410.09382v1",
+        "basis": "pdf_watermark",
+        "original_download_url": null
+      },
+      "publication": {
+        "status": "not_independently_verified",
+        "venue": null,
+        "year": null,
+        "source_url": null
+      },
+      "metadata_review": {
+        "pdf_page": 1,
+        "checked_fields": ["title", "authors", "arxiv_version", "arxiv_date"],
+        "notes": "以首页标题、作者与水印核对。Sannyuya Liu 按正文拼写保存。未依据排版样式推断出版期刊或会议。"
+      }
+    },
+    {
+      "paper_id": "idea",
+      "display_name": "IDEA",
+      "file_name": "（五）Wang 等 - 2025 - IDEA Inverted Text with Cooperative Deformable Aggregation for Multi-modal Object Re-Identification.pdf",
+      "sha256": "910850fea83d68fd86fc6f0f39856bdcab0642b63bc8072077cfbee875f30505",
+      "size_bytes": 25997055,
+      "page_count": 19,
+      "title": "IDEA: Inverted Text with Cooperative Deformable Aggregation for Multi-modal Object Re-Identification",
+      "authors": ["Yuhao Wang", "Yongfeng Lv", "Pingping Zhang", "Huchuan Lu"],
+      "material_version": {
+        "kind": "arxiv_preprint",
+        "identifier": "arXiv:2503.10324v1",
+        "date": "2025-03-13",
+        "copyright_year_on_pdf": null
+      },
+      "source": {
+        "url": "https://arxiv.org/pdf/2503.10324v1",
+        "basis": "pdf_watermark",
+        "original_download_url": null
+      },
+      "publication": {
+        "status": "not_independently_verified",
+        "venue": null,
+        "year": null,
+        "source_url": null
+      },
+      "metadata_review": {
+        "pdf_page": 1,
+        "checked_fields": ["title", "authors", "arxiv_version", "arxiv_date"],
+        "notes": "以首页标题、作者与水印核对，页数按本地 PDF 全文件计数。未将后续可能存在的会议版本混入本地 arXiv v1。"
+      }
+    },
+    {
+      "paper_id": "next",
+      "display_name": "NEXT",
+      "file_name": "（六）Li 等 - 2025 - NEXT Multi-Grained Mixture of Experts via Text-Modulation for Multi-Modal Object Re-Identification.pdf",
+      "sha256": "26cee6d98e15dfcbd08b404bd0adfc343ca6bbcb9ae4042431c5efb4c7d7d337",
+      "size_bytes": 7126767,
+      "page_count": 21,
+      "title": "NEXT: Multi-Grained Mixture of Experts via Text-Modulation for Multi-Modal Object Re-Identification",
+      "authors": ["Shihao Li", "Aihua Zheng", "Andong Lu", "Jin Tang", "Jixin Ma"],
+      "material_version": {
+        "kind": "arxiv_preprint",
+        "identifier": "arXiv:2505.20001v4",
+        "date": "2025-08-10",
+        "copyright_year_on_pdf": 2026
+      },
+      "source": {
+        "url": "https://arxiv.org/pdf/2505.20001v4",
+        "basis": "pdf_watermark",
+        "original_download_url": null
+      },
+      "publication": {
+        "status": "not_independently_verified",
+        "venue": null,
+        "year": null,
+        "source_url": null
+      },
+      "metadata_review": {
+        "pdf_page": 1,
+        "checked_fields": ["title", "authors", "arxiv_version", "arxiv_date", "copyright_year"],
+        "notes": "首页水印为 2025-08-10 的 arXiv v4，首页同时写有 AAAI ©2026。保留两者差异，不把版权年份认定为已核实的出版年份，也不从文件名的 2025 推断出版信息。"
+      }
+    }
+  ]
+}

@@ -1,16 +1,47 @@
+# Local credentials; keep environment templates in source control.
 .env
+.env.*
+!.env.example
+!.env.*.example
+
+# Private research materials, local reports, and backups.
+datasets/
 evaluation/papers/
+.tmp/
+backups/
+
+# Local iteration requirements and execution plan.
+/docs/2026-10-13-research-assistant-v2-iteration-plan.zh-CN.md
+
+# Local tool state and dependency caches.
+/.codex/
 .worktrees/
 .venv/
+node_modules/
+.pnpm-store/
+
+# Python bytecode, checks, and test coverage.
 __pycache__/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
 .pyright/
 *.py[cod]
-frontend/node_modules/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+coverage/
+
+# Frontend build output and browser test artifacts.
 frontend/.next/
 frontend/playwright-report/
 frontend/test-results/
-.tmp/
-backups/
+*.tsbuildinfo
+
+# Runtime logs and operating-system metadata.
+*.log
+*.log.*
+.DS_Store
+Thumbs.db
+Desktop.ini

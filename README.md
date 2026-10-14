@@ -18,6 +18,10 @@ reading, and discussing papers. The current platform provides:
 Conversation memory is working context, not paper evidence. Claims presented as
 paper evidence still require retrieved chunks and citation verification.
 
+The V2 iteration starts with a fixed local ReID corpus. See
+[the corpus inventory and acceptance steps](evaluation/README.md) to verify the
+six private PDFs against their reviewed versions before importing or evaluating.
+
 ## Prerequisites
 
 - Docker with Docker Compose
