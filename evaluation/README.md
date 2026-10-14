@@ -129,3 +129,81 @@ API、Worker 和基础设施启动后，在仓库根目录执行：
 本地自动化验证使用合成 PDF、隔离 PostgreSQL、内存对象存储和 Fake Embedding Provider；
 覆盖真实 HTTP 路由、上传去重、Outbox、解析/切片/向量持久化与重复导入。
 真实语料、真实模型和 Celery Worker 的端到端验收由上述操作单独完成。
+
+## T0.3 科研任务与事实对照
+
+[固定任务集](datasets/reid_research_tasks.jsonl)包含 20 个任务：方法理解、跨论文比较、
+想法质疑、实验设计、记忆与更正各 4 个。任务覆盖全部 6 篇固定材料，包含 125 处
+原文引用（共 62 个不同片段，分布在 21 个 PDF 物理页）。每处记录论文 ID、材料
+版本、SHA-256、页码、段落/图表定位与原文；事实题另列可接受的语义回答要点。
+开放题明确必要分析、错误边界与下一步要求。
+
+[人工评审标准](rubrics/reid_research_review.md)给出五项评分的 0/1/2 分示例、阻断
+规则与连续对话操作。题目和用户对话是编写的验收场景，论文片段来自固定原文。
+合成用户报告中的数值不是实测结果。跨会话隔离、压缩、更正和撤回等场景所需
+能力尚未支持时，后续运行如实记录 `capability_missing`。
+所有 GPU、时间、计划和用户实验报告均是题目条件，不代表真实用户资源或已完成
+的实验。此次按实际论文的[逐题审校记录](rubrics/reid_task_source_audit.md)包含
+协议补全、指标标签冲突和缺文本/缺图像的区分，便于抽查修订依据。
+
+### Docker 本地验收
+
+使用当前后端镜像，在仓库根目录执行：
+
+```powershell
+.\scripts\check-reid-research-tasks.ps1 -Docker
+```
+
+脚本默认使用 `research-agent-mvp-api` 镜像（可用 `-Image` 指定），启动一次性校验
+容器；题库、清单和本地 `datasets/` 只读挂载。校验不需要 API、数据库或模型服务，
+容器不联网，也不载入 `.env`。后端源码更新后需先更新镜像：
+
+```powershell
+docker compose -p research-agent-mvp -f infra/compose.yaml build api
+```
+
+没有本地 PDF 时可以只检查题库结构、来源清单及覆盖范围：
+
+```powershell
+.\scripts\check-reid-research-tasks.ps1 -Docker -StructureOnly
+```
+
+也支持已安装后端依赖的宿主机 Python：
+
+```powershell
+.\scripts\check-reid-research-tasks.ps1
+.\scripts\check-reid-research-tasks.ps1 -Python .\backend\.venv\Scripts\python.exe
+```
+
+本轮验收步骤：
+
+1. 完整校验预期 `status=passed`、`validation_scope=structure_and_pdf_sources`，
+   `task_count=20`、五类计数各 4、`checked_pages=21`、
+   `checked_excerpt_references=125`，退出码 0。仅结构检查时页数/片段检查数为 0。
+2. 抽查事实题的 `sources` 与 `fact_checks`：回读固定 PDF 的完整相关页，确认
+   原文、表头、图注和条件确实支持回答要点。片段匹配本身不证明解释正确。
+3. 抽查开放题与 R01–R04 连续场景，确认分析、错误边界、下一步和更正检查点
+   可执行；检查人工标准中五项 0/1/2 示例及“每项至少 1、总分至少 8、无阻断”。
+4. 在临时副本中修改题库的哈希、版本、页码或原文片段，完整校验应拒绝，退出码 2。
+   不修改原 PDF 或已确认的清单。
+
+校验始终报告 `answer_quality_evaluated=false`。T0.3 交付题库和人工标准，实际模型
+回答、延迟、Token 与费用的基线运行属于 T0.4。
+
+### 人工评分记录
+
+在已安装依赖的后端开发环境中生成空白记录，填写真实回答后再汇总：
+
+```powershell
+python -m research_agent.evaluation.research_tasks review-template --output ../.tmp/reid-research-review.jsonl
+python -m research_agent.evaluation.research_tasks review --reviews ../.tmp/reid-research-review.jsonl
+```
+
+模板初始为 `not_run`，五项分数均为 `null`；生成工具保护已有文件，不覆盖评分。
+评分绑定任务指纹和标准版本，必须保存真实运行、评审人、带时区的时间、回答位置
+及逐项理由。具体填写方式见人工标准。空白记录返回 `pending`、退出码 3；存在
+未达标或执行失败返回 1；全部通过返回 0；文件/结构错误返回 2。工具不调用模型
+或自动替人评分，运行记录保存在忽略的 `.tmp/`。
+
+`evaluation/datasets/` 是需要提交的验收题库；私有论文位于忽略的仓库根目录
+`datasets/`。本地需求计划、PDF、评分结果、模型回答和凭据保持在远端之外。

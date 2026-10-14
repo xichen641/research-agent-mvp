@@ -23,6 +23,8 @@ The V2 iteration starts with a fixed local ReID corpus. See
 six private PDFs against their reviewed versions before importing or evaluating.
 The same guide covers `scripts/import-reid-corpus.ps1`, which uploads the fixed
 corpus through the existing ingestion API and reports duplicates and parse quality.
+It also provides 20 fixed research tasks, their source excerpts and human review
+criteria, plus `scripts/check-reid-research-tasks.ps1 -Docker` for source validation.
 
 ## Prerequisites
 

@@ -5,7 +5,7 @@
 !.env.*.example
 
 # Private research materials, local reports, and backups.
-datasets/
+/datasets/
 evaluation/papers/
 .tmp/
 backups/
