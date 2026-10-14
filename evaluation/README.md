@@ -66,3 +66,66 @@ T0.2 负责导入与解析质量，T0.3/T0.4 负责科研任务集和模型体�
 确认需要换版后，创建新的 `corpus_version` 和清单文件，重新核对正文元数据；
 保留旧清单供历史评测追溯。PDF 保持在已忽略的 `datasets/` 中，运行报告建议
 保存到 `.tmp/`。源码只提交元数据、工具与测试。
+
+## T0.2 本地批量导入与质量报告
+
+API、Worker 和基础设施启动后，在仓库根目录执行：
+
+```powershell
+.\scripts\import-reid-corpus.ps1 -WaitSeconds 600
+```
+
+使用已安装后端依赖的 Python；也可通过 `-Python` 显式指定虚拟环境。
+`-ApiUrl` 默认为 `http://127.0.0.1:8000`，自定义端口时传入对应 API 地址。
+脚本读取本地文件并通过已有 `POST /api/v1/documents` 上传，复用 SHA-256 去重、
+事务 Outbox 和 Worker 摄取。服务端未新增读取宿主机路径的接口。
+
+默认报告保存在 `.tmp/reid-import-report.json`。每次执行生成独立 `run_id`；
+需要保留多次运行时指定不同输出文件：
+
+```powershell
+.\scripts\import-reid-corpus.ps1 -WaitSeconds 600 -OutputPath .tmp/reid-import-first.json
+.\scripts\import-reid-corpus.ps1 -WaitSeconds 600 -OutputPath .tmp/reid-import-repeat.json
+```
+
+本地预检不符合清单的文件不会上传，其余文件继续处理；清单外 PDF 只列出，
+不自动导入。上传前再次核对哈希，避免预检后的文件替换被当作固定版本接受。
+
+报告为每篇保存以下两组结果，统计可重叠：
+
+- `import_result`：`imported`（本次新导入）、`duplicate`（复用已有记录）、
+  `not_imported` 或 `unknown`（未取得可信上传回执）。
+- `state`：`ready`、`processing`、`failed`、`needs_review`、`local_error`
+  或 `unknown`。`duplicate` 不代表论文已经可用，仍须检查处理状态。
+
+报告包含文档/版本/任务 ID、任务阶段与进度、解析器版本、实际解析页数、
+文本量、空页、章节/表格/图片数量及质量警告。质量来自摄取流程持久化的数据，
+通过新增的 `GET /api/v1/documents/{document_id}/quality` 返回白名单字段；
+不返回对象存储键或原文。旧资料尚无有效质量报告时保留 `pending` / `unavailable`。
+任务失败码为 `PARSE_QUALITY_REVIEW` 时归为 `needs_review`。
+
+默认 `-WaitSeconds 0`：上传并查询一次当前状态后返回；大于 0 时，每隔
+`-PollInterval` 秒（默认 2 秒）刷新未完成项，等待窗口从上传结束后开始。
+超过等待窗口时保留 `processing`，不将其写成摄取失败。轮询只读取状态，不重新上传。
+报告随进度原子更新；Ctrl+C 只结束本地等待，已经接受的后台摄取仍继续。
+重跑通过服务端去重恢复既有 ID；上传响应丢失或服务端 5xx 时标记结果未知，
+不凭客户端异常推断服务端没有接受文件。
+已有失败任务通过现有页面或任务重试接口处理；批量脚本再次执行会复用原记录并
+刷新状态，不自动重试失败的摄取。
+
+退出码：0 = 全部处理完成且质量可用；1 = 有失败、需检查、未知、缺失/变化或清单外文件；
+2 = 参数、清单或报告读写错误；3 = 尚有处理中项；130 = 用户中断。
+
+端到端验收：
+
+1. 首次执行后，6 篇都有明确结果；页面可见新导入的论文，报告 ID 对应服务端资料与任务。
+2. 再次执行，6 篇均为 `duplicate`，两份报告的文档、版本、任务 ID 完全一致；
+   页面中的论文数量不增加。
+3. 处理完成的文件报告 `ready` 并有质量信息；失败显示阶段与错误；低质量解析
+   显示 `needs_review`。这些状态按实际结果验收，不要求把所有论文强行标为成功。
+4. 在临时语料副本中移走或替换一个 PDF，该文件不上传，其他匹配文件继续处理。
+5. 网络中断后重新执行可找回已有记录；本地停止等待后，已有后台任务仍可在页面查看。
+
+本地自动化验证使用合成 PDF、隔离 PostgreSQL、内存对象存储和 Fake Embedding Provider；
+覆盖真实 HTTP 路由、上传去重、Outbox、解析/切片/向量持久化与重复导入。
+真实语料、真实模型和 Celery Worker 的端到端验收由上述操作单独完成。

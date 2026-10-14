@@ -21,6 +21,8 @@ paper evidence still require retrieved chunks and citation verification.
 The V2 iteration starts with a fixed local ReID corpus. See
 [the corpus inventory and acceptance steps](evaluation/README.md) to verify the
 six private PDFs against their reviewed versions before importing or evaluating.
+The same guide covers `scripts/import-reid-corpus.ps1`, which uploads the fixed
+corpus through the existing ingestion API and reports duplicates and parse quality.
 
 ## Prerequisites
 

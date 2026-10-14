@@ -1,16 +1,14 @@
-from collections.abc import AsyncIterator
 import base64
+import json
+from collections.abc import AsyncIterator
 from datetime import datetime, timedelta
 from functools import lru_cache
-import json
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Query, UploadFile
 from fastapi.responses import RedirectResponse
-from pydantic import BaseModel
-from sqlalchemy.ext.asyncio import AsyncSession
-
+from pydantic import BaseModel, ValidationError
 from research_agent.config import get_settings
 from research_agent.papers.domain import (
     DocumentDetailRecord,
@@ -18,13 +16,14 @@ from research_agent.papers.domain import (
     PaperPersistenceError,
     SafeDocumentVersionRecord,
 )
+from research_agent.papers.quality import DocumentQualityResponse, ParseQualityResponse
 from research_agent.papers.repository import SqlPaperRepository
 from research_agent.papers.service import PaperService, UploadPaperCommand
 from research_agent.papers.storage import MinioObjectStorage, ObjectStorage
 from research_agent.shared.db import async_session_factory
 from research_agent.shared.errors import AppError
 from research_agent.shared.ids import EntityId
-
+from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter()
 
@@ -145,6 +144,45 @@ async def get_document_detail(
     return _detail_response(record)
 
 
+@router.get("/documents/{document_id}/quality", response_model=DocumentQualityResponse)
+async def get_document_quality(
+    document_id: EntityId,
+    repository: Annotated[SqlPaperRepository, Depends(get_paper_repository)],
+) -> DocumentQualityResponse:
+    try:
+        document = await repository.get_document(document_id)
+        version = (
+            await repository.get_version(document.current_version_id)
+            if document is not None
+            else None
+        )
+    except PaperPersistenceError:
+        raise _paper_query_error() from None
+    if document is None or version is None or version.document_id != document_id:
+        raise AppError(code="DOCUMENT_NOT_FOUND", message="Document was not found")
+    quality = None
+    quality_state: Literal["available", "pending", "unavailable"] = (
+        "pending" if version.status == "PROCESSING" else "unavailable"
+    )
+    if version.parse_quality is not None:
+        try:
+            quality = ParseQualityResponse.model_validate(version.parse_quality)
+            quality_state = "available"
+        except ValidationError:
+            quality_state = "unavailable"
+    return DocumentQualityResponse(
+        document_id=document.id,
+        version_id=version.id,
+        source_sha256=document.sha256,
+        status=version.status,
+        parser_name=version.parser_name,
+        parser_version=version.parser_version,
+        pipeline_version=version.pipeline_version,
+        quality_state=quality_state,
+        quality=quality,
+    )
+
+
 @router.get("/documents/{document_id}/pdf", response_class=RedirectResponse)
 async def open_document_pdf(
     document_id: EntityId,
@@ -211,7 +249,7 @@ def _decode_cursor(cursor: str) -> tuple[datetime, EntityId]:
         if not isinstance(payload["created_at"], str) or not isinstance(
             payload["id"], str
         ):
-            raise ValueError("invalid cursor values")
+            raise TypeError("invalid cursor values")
         created_at = datetime.fromisoformat(payload["created_at"])
         if created_at.tzinfo is None:
             raise ValueError("cursor timestamp must include timezone")

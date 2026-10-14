@@ -1,13 +1,42 @@
 import asyncio
+import hashlib
+import json
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
+from io import BytesIO
 from pathlib import Path
+from typing import BinaryIO
 
-from alembic import command
-from alembic.config import Config
 import httpx
 import pytest
 import pytest_asyncio
+from alembic import command
+from alembic.config import Config
+from reportlab.pdfgen.canvas import Canvas
+from research_agent.evaluation.corpus import CorpusManifest
+from research_agent.evaluation.import_corpus import import_corpus
+from research_agent.ingestion.pdf_parser import PdfiumTextDocumentParser
+from research_agent.ingestion.pipeline import IngestionPipeline
+from research_agent.main import create_app
+from research_agent.papers.domain import PaperPersistenceError
+from research_agent.papers.models import (
+    DocumentModel,
+    DocumentTaskModel,
+    DocumentVersionModel,
+    OutboxEventModel,
+)
+from research_agent.papers.repository import SqlPaperRepository
+from research_agent.papers.routes import (
+    get_db_session,
+    get_object_storage,
+    get_paper_repository,
+)
+from research_agent.papers.storage import ObjectStorage
+from research_agent.providers.fake import FakeEmbeddingProvider
+from research_agent.retrieval.repository import SqlEmbeddingRepository
+from research_agent.shared.ids import new_id
+from research_agent.tasks.domain import TaskStage, TaskStatus
+from research_agent.tasks.repository import SqlTaskRepository
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
@@ -15,18 +44,6 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from testcontainers.postgres import PostgresContainer
-
-from research_agent.main import create_app
-from research_agent.papers.models import (
-    DocumentModel,
-    DocumentTaskModel,
-    DocumentVersionModel,
-    OutboxEventModel,
-)
-from research_agent.papers.domain import PaperPersistenceError
-from research_agent.papers.routes import get_db_session, get_paper_repository
-from research_agent.shared.ids import new_id
-from research_agent.tasks.domain import TaskStage, TaskStatus
 
 
 @pytest.fixture(scope="session")
@@ -127,8 +144,12 @@ def build_client(
     factory: async_sessionmaker[AsyncSession],
     *,
     origin: str | None = None,
+    storage: ObjectStorage | None = None,
 ) -> httpx.AsyncClient:
     app = create_app(web_origin="http://web.test")
+
+    if storage is not None:
+        app.dependency_overrides[get_object_storage] = lambda: storage
 
     async def override_db_session() -> AsyncIterator[AsyncSession]:
         async with factory() as session:
@@ -412,6 +433,10 @@ async def test_cors_allows_only_configured_web_origin(
 
 
 class FailingPaperQueryRepository:
+    async def get_document(self, document_id: object) -> object:
+        del document_id
+        raise PaperPersistenceError() from RuntimeError("private SQL token")
+
     async def list_documents(self, **kwargs: object) -> object:
         del kwargs
         raise PaperPersistenceError() from RuntimeError("private SQL token")
@@ -427,6 +452,7 @@ class FailingPaperQueryRepository:
     [
         "/api/v1/documents",
         f"/api/v1/documents/{new_id()}",
+        f"/api/v1/documents/{new_id()}/quality",
     ],
 )
 async def test_document_reads_translate_persistence_failures_to_safe_problem(
@@ -449,3 +475,167 @@ async def test_document_reads_translate_persistence_failures_to_safe_problem(
     assert "private" not in response.text.lower()
     assert "sql" not in response.text.lower()
     assert "token" not in response.text.lower()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize("quality_kind", ["available", "pending", "legacy_invalid"])
+async def test_document_quality_returns_only_public_fields(
+    session_factory: async_sessionmaker[AsyncSession],
+    quality_kind: str,
+) -> None:
+    document, version, _ = await seed_document(
+        session_factory,
+        title="Quality",
+        created_at=datetime.now(UTC),
+    )
+    quality = {
+        "total_pages": 2,
+        "parsed_pages": 2,
+        "body_characters": 500,
+        "empty_pages": [],
+        "section_count": 1,
+        "table_count": 0,
+        "image_count": 0,
+        "warnings": [],
+    }
+    async with session_factory() as session:
+        stored = await session.get(DocumentVersionModel, version.id)
+        assert stored is not None
+        stored.parser_version = "test-parser-v1"
+        stored.parse_quality = (
+            {**quality, "source_object_key": "private/key", "private": "secret"}
+            if quality_kind == "available"
+            else None
+            if quality_kind == "pending"
+            else {"private": "secret"}
+        )
+        await session.commit()
+    async with build_client(session_factory) as client:
+        response = await client.get(f"/api/v1/documents/{document.id}/quality")
+        missing = await client.get(f"/api/v1/documents/{new_id()}/quality")
+    assert response.status_code == 200
+    assert missing.status_code == 404
+    payload = response.json()
+    assert payload["document_id"] == str(document.id)
+    assert payload["version_id"] == str(version.id)
+    assert payload["source_sha256"] == document.sha256
+    assert payload["quality_state"] == (
+        "available"
+        if quality_kind == "available"
+        else "pending"
+        if quality_kind == "pending"
+        else "unavailable"
+    )
+    assert payload["quality"] == (quality if quality_kind == "available" else None)
+    assert "private" not in response.text
+    assert "source_object_key" not in response.text
+    assert "parsed_json_object_key" not in response.text
+
+
+class BatchMemoryStorage:
+    def __init__(self) -> None:
+        self.objects: dict[str, bytes] = {}
+
+    def put(self, *, key: str, stream: BinaryIO, content_type: str) -> None:
+        self.objects[key] = stream.read()
+
+    def get(self, *, key: str) -> BinaryIO:
+        return BytesIO(self.objects[key])
+
+    def delete(self, *, key: str) -> None:
+        self.objects.pop(key, None)
+
+    def presigned_get(self, *, key: str, expires: timedelta) -> str:
+        return "https://objects.test/private"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_batch_import_pipeline_and_repetition_create_only_six_durable_records(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # Synthetic PDFs and Fake embeddings; no real model or private corpus needed.
+    source = Path(__file__).parents[3] / "evaluation/corpora/reid-v1.json"
+    data = json.loads(source.read_text(encoding="utf-8"))
+    directory = tmp_path / data["dataset_root"]
+    directory.mkdir(parents=True)
+    for index, paper in enumerate(data["papers"], 1):
+        pdf = directory / f"paper-{index}.pdf"
+        canvas = Canvas(str(pdf))
+        for line in range(8):
+            canvas.drawString(
+                72,
+                720 - line * 20,
+                f"Research material {index} with enough original body text for reliable parsing.",
+            )
+        canvas.showPage()
+        canvas.save()
+        paper.update(
+            file_name=pdf.name,
+            page_count=1,
+            size_bytes=pdf.stat().st_size,
+            sha256=hashlib.sha256(pdf.read_bytes()).hexdigest(),
+        )
+    manifest = CorpusManifest.model_validate_json(json.dumps(data))
+    storage = BatchMemoryStorage()
+    loop = asyncio.get_running_loop()
+    async with build_client(session_factory, storage=storage) as api_client:
+
+        async def forward(request: httpx.Request) -> httpx.Response:
+            response = await api_client.request(
+                request.method,
+                request.url.path,
+                content=request.content,
+                headers=request.headers,
+            )
+            return httpx.Response(
+                response.status_code, content=response.content, headers=response.headers
+            )
+
+        def bridge(request: httpx.Request) -> httpx.Response:
+            return asyncio.run_coroutine_threadsafe(forward(request), loop).result(
+                timeout=30
+            )
+
+        with httpx.Client(
+            transport=httpx.MockTransport(bridge), base_url="http://test/api/v1/"
+        ) as batch_client:
+            first = await asyncio.to_thread(
+                import_corpus, manifest, root=tmp_path, client=batch_client
+            )
+            assert first.summary["imported"] == first.summary["processing"] == 6
+            for item in first.papers:
+                assert item.version_id is not None
+                async with session_factory() as session:
+                    pipeline = IngestionPipeline(
+                        PdfiumTextDocumentParser(),
+                        storage,
+                        SqlPaperRepository(session),
+                        SqlTaskRepository(session),
+                        embedding_provider=FakeEmbeddingProvider(dimension=1536),
+                        embedding_repository=SqlEmbeddingRepository(session),
+                    )
+                    await pipeline.run(item.version_id)
+            second = await asyncio.to_thread(
+                import_corpus, manifest, root=tmp_path, client=batch_client
+            )
+    assert second.summary["duplicate"] == second.summary["ready"] == 6
+    assert [item.document_id for item in first.papers] == [
+        item.document_id for item in second.papers
+    ]
+    assert [item.version_id for item in first.papers] == [
+        item.version_id for item in second.papers
+    ]
+    assert [item.task_id for item in first.papers] == [
+        item.task_id for item in second.papers
+    ]
+    async with session_factory() as session:
+        for model in (
+            DocumentModel,
+            DocumentVersionModel,
+            DocumentTaskModel,
+            OutboxEventModel,
+        ):
+            assert await session.scalar(select(func.count()).select_from(model)) == 6
