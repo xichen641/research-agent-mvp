@@ -207,3 +207,11 @@ python -m research_agent.evaluation.research_tasks review --reviews ../.tmp/reid
 
 `evaluation/datasets/` 是需要提交的验收题库；私有论文位于忽略的仓库根目录
 `datasets/`。本地需求计划、PDF、评分结果、模型回答和凭据保持在远端之外。
+
+## T0.4 当前体验基线
+
+使用 [Docker 基线执行器](../scripts/run-reid-baseline.ps1)对固定问题发起真实
+API/Worker 请求，记录进度、正文、完成时间、工作流检索动作、已观测 LLM Token、
+模型与材料身份以及失败/缺失能力。操作、测量定义、暂定门槛与复测方法见
+[基线协议](baselines/README.md)。实际运行报告保存在忽略的 `.tmp/reid-baselines/`，
+人工答案评分独立进行。

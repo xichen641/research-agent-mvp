@@ -25,6 +25,8 @@ The same guide covers `scripts/import-reid-corpus.ps1`, which uploads the fixed
 corpus through the existing ingestion API and reports duplicates and parse quality.
 It also provides 20 fixed research tasks, their source excerpts and human review
 criteria, plus `scripts/check-reid-research-tasks.ps1 -Docker` for source validation.
+The [baseline protocol](evaluation/baselines/README.md) explains how to run these
+tasks against the Docker services and record timing, model usage, and capability gaps.
 
 ## Prerequisites
 

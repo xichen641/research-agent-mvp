@@ -20,8 +20,8 @@ from research_agent.chat.context import (
 from research_agent.chat.domain import (
     AnswerDraft,
     ChatGraphState,
-    ChatRunEventRecord,
     ChatMessageRecord,
+    ChatRunEventRecord,
     GeneralAnswer,
     ModelKnowledgeBlock,
     QueryPlan,
@@ -69,9 +69,7 @@ CHECKPOINT_MSGPACK_ALLOWLIST = (
 
 
 def checkpoint_serializer() -> JsonPlusSerializer:
-    return JsonPlusSerializer(
-        allowed_msgpack_modules=CHECKPOINT_MSGPACK_ALLOWLIST
-    )
+    return JsonPlusSerializer(allowed_msgpack_modules=CHECKPOINT_MSGPACK_ALLOWLIST)
 
 
 def route_after_evidence_check(
@@ -157,6 +155,9 @@ def compile_chat_graph(
             raise ValueError("query plan is missing")
         lexical_queries = plan.lexical_queries or (plan.original_query,)
         semantic_query = plan.semantic_query.strip() or plan.original_query
+        await dependencies.chats.record_event(
+            run_id=state["run_id"], event_type="retrieval_started", payload={}
+        )
         evidence = await dependencies.retrieval.retrieve(
             RetrievalQuery(
                 original=plan.original_query,

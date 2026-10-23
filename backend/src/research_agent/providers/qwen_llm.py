@@ -1,12 +1,23 @@
+import hashlib
 import json
+import logging
+from datetime import UTC, datetime
+from time import perf_counter
 from typing import Protocol
+from uuid import uuid4
 
 import httpx
 from pydantic import ValidationError
-
 from research_agent.config import Settings
 from research_agent.providers.protocols import ChatTurn, OutputT
+from research_agent.providers.telemetry import (
+    ModelCallObservation,
+    ModelCallObserver,
+    response_metadata,
+)
 from research_agent.shared.errors import AppError
+
+logger = logging.getLogger(__name__)
 
 
 class AsyncHTTPClient(Protocol):
@@ -32,6 +43,7 @@ class QwenLLMProvider:
         base_url: str,
         api_key: str,
         model_id: str,
+        observer: ModelCallObserver | None = None,
     ) -> None:
         normalized_base_url = base_url.rstrip("/")
         if not normalized_base_url.startswith("https://"):
@@ -44,6 +56,7 @@ class QwenLLMProvider:
         self._endpoint = f"{normalized_base_url}/chat/completions"
         self._api_key = api_key
         self.model_id = model_id
+        self._observer = observer
 
     async def generate_structured(
         self,
@@ -71,6 +84,58 @@ class QwenLLMProvider:
         # One bounded retry absorbs transient provider and schema failures.
         # 仅进行一次有界重试，用于吸收瞬时服务故障或结构化输出偏差。
         for attempt in range(2):
+            started_at = datetime.now(UTC)
+            started = perf_counter()
+            request_sha256 = hashlib.sha256(
+                json.dumps(
+                    {"model": self.model_id, "messages": request_messages},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ).encode("utf-8")
+            ).hexdigest()
+
+            async def observe(
+                outcome: str,
+                response: httpx.Response | None = None,
+                *,
+                observation_attempt: int = attempt + 1,
+                observation_started_at: datetime = started_at,
+                observation_started: float = started,
+                observation_request_sha256: str = request_sha256,
+            ) -> None:
+                if self._observer is None:
+                    return
+                payload: object = None
+                if response is not None:
+                    try:
+                        payload = response.json()
+                    except ValueError:
+                        pass
+                model, tokens = response_metadata(payload)
+                observation = ModelCallObservation.model_validate(
+                    {
+                        "call_id": uuid4(),
+                        "operation": operation,
+                        "attempt": observation_attempt,
+                        "requested_model": self.model_id,
+                        "response_model": model,
+                        "started_at": observation_started_at,
+                        "finished_at": datetime.now(UTC),
+                        "duration_ms": (perf_counter() - observation_started) * 1000,
+                        "outcome": outcome,
+                        "http_status": None
+                        if response is None
+                        else response.status_code,
+                        **tokens,
+                        "request_sha256": observation_request_sha256,
+                    }
+                )
+                try:
+                    await self._observer(observation)
+                except Exception:  # noqa: BLE001 -- best-effort telemetry
+                    # A telemetry persistence failure must not alter answer behavior.
+                    logger.warning("Model-call measurement could not be persisted")
+
             try:
                 response = await self._client.post(
                     self._endpoint,
@@ -86,15 +151,18 @@ class QwenLLMProvider:
                     },
                 )
             except httpx.HTTPError as error:
+                await observe("transport_error")
                 if attempt == 0:
                     continue
                 raise _unavailable() from error
 
             if response.status_code in {408, 429} or response.status_code >= 500:
+                await observe("http_error", response)
                 if attempt == 0:
                     continue
                 raise _unavailable()
             if response.status_code >= 400:
+                await observe("http_error", response)
                 raise AppError(
                     "LLM_REQUEST_FAILED",
                     "Language model request could not be completed",
@@ -106,15 +174,16 @@ class QwenLLMProvider:
                     raise ValueError("invalid choices")
                 choice = choices[0]
                 if not isinstance(choice, dict):
-                    raise ValueError("invalid choice")
+                    raise TypeError("invalid choice")
                 message = choice.get("message")
                 if not isinstance(message, dict):
-                    raise ValueError("invalid message")
+                    raise TypeError("invalid message")
                 content = message.get("content")
                 if not isinstance(content, str):
-                    raise ValueError("invalid content")
-                return output_type.model_validate_json(content)
+                    raise TypeError("invalid content")
+                result = output_type.model_validate_json(content)
             except (KeyError, TypeError, ValueError, ValidationError) as error:
+                await observe("invalid_response", response)
                 if attempt == 0:
                     request_messages.append(
                         {
@@ -130,6 +199,9 @@ class QwenLLMProvider:
                     "LLM_INVALID_RESPONSE",
                     "Language model returned an invalid structured response",
                 ) from error
+            else:
+                await observe("completed", response)
+                return result
         raise _unavailable()
 
 

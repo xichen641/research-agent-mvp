@@ -8,6 +8,12 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from research_agent.chat.diagnostics import (
+    RunDiagnosticsReader,
+    RuntimeConfiguration,
+    read_run_diagnostics,
+    runtime_configuration,
+)
 from research_agent.chat.domain import (
     ChatMessageRecord,
     ChatRole,
@@ -19,10 +25,10 @@ from research_agent.chat.domain import (
 )
 from research_agent.chat.repository import SqlChatRepository
 from research_agent.chat.stream import ChatStream, PersistedChatStream, answer_payload
+from research_agent.config import get_settings
 from research_agent.papers.routes import get_db_session
 from research_agent.retrieval.domain import RetrievalScope
 from research_agent.shared.errors import AppError
-
 
 router = APIRouter(prefix="/chat")
 
@@ -110,6 +116,25 @@ def get_chat_history(
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> ChatHistory:
     return SqlChatRepository(session)
+
+
+def get_chat_diagnostics(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> RunDiagnosticsReader:
+    return SqlChatRepository(session)
+
+
+@router.get("/evaluation/config", response_model=RuntimeConfiguration)
+async def get_evaluation_configuration() -> RuntimeConfiguration:
+    return runtime_configuration(get_settings())
+
+
+@router.get("/runs/{run_id}/diagnostics")
+async def get_run_diagnostics(
+    run_id: UUID,
+    reader: Annotated[RunDiagnosticsReader, Depends(get_chat_diagnostics)],
+) -> dict[str, object]:
+    return await read_run_diagnostics(reader, run_id)
 
 
 def get_chat_commands(request: Request) -> ChatCommands:
