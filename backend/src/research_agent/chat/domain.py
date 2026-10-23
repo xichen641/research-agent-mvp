@@ -10,7 +10,6 @@ from research_agent.retrieval.domain import (
     RetrievalScope,
 )
 
-
 ChatIntent = Literal["fact", "summary", "compare_methods", "background"]
 ChatRole = Literal["user", "assistant"]
 ChatRunStatus = Literal["QUEUED", "RUNNING", "SUCCEEDED", "FAILED"]
@@ -184,6 +183,7 @@ class ChatGraphState(TypedDict):
     scope: RetrievalScope
     retrieval_mode: RetrievalMode
     history_message_count: int
+    research_context: NotRequired[dict[str, object] | None]
     context: NotRequired[list[dict[str, str]]]
     memory_summary: NotRequired[str]
     memory_compacted: NotRequired[bool]
@@ -202,6 +202,7 @@ class ChatSessionRecord:
     scope: RetrievalScope
     created_at: datetime
     updated_at: datetime
+    research_space_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,6 +226,7 @@ class ChatRunRecord:
     scope: RetrievalScope | None = None
     retrieval_mode: RetrievalMode = "auto"
     history_message_count: int = 0
+    research_context: dict[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,6 +252,7 @@ class PreparedChatRun:
     scope: RetrievalScope
     retrieval_mode: RetrievalMode = "auto"
     history_message_count: int = 0
+    research_context: dict[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)

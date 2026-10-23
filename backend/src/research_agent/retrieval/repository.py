@@ -7,19 +7,19 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from research_agent.ingestion.models import DocumentChunkModel
 from research_agent.ingestion.chunker import lexical_text
+from research_agent.ingestion.models import DocumentChunkModel
 from research_agent.papers.domain import DocumentStatus, VersionStatus
 from research_agent.papers.models import (
     DocumentModel,
     DocumentTaskModel,
     DocumentVersionModel,
 )
+from research_agent.retrieval.domain import RetrievalCandidate, RetrievalQuery
 from research_agent.retrieval.models import (
     ChunkEmbeddingModel,
     EmbeddingSpaceModel,
 )
-from research_agent.retrieval.domain import RetrievalCandidate, RetrievalQuery
 from research_agent.shared.ids import EntityId, new_id
 from research_agent.tasks.domain import TaskStage, TaskStatus
 
@@ -406,16 +406,24 @@ def _candidate_select(rank: Any) -> Any:
         )
         .where(
             DocumentVersionModel.status == VersionStatus.READY,
-            DocumentModel.status == DocumentStatus.READY,
-            DocumentModel.current_version_id == DocumentVersionModel.id,
+            DocumentModel.status != DocumentStatus.DELETED,
             DocumentChunkModel.content_type != "reference",
         )
     )
 
 
 def _apply_scope(statement: Any, query: RetrievalQuery) -> Any:
+    if query.scope.restrict_to_scope or query.scope.document_version_ids:
+        statement = statement.where(
+            DocumentVersionModel.id.in_(query.scope.document_version_ids)
+        )
+    else:
+        statement = statement.where(
+            DocumentModel.status == DocumentStatus.READY,
+            DocumentModel.current_version_id == DocumentVersionModel.id,
+        )
     if query.scope.document_ids:
-        return statement.where(DocumentModel.id.in_(query.scope.document_ids))
+        statement = statement.where(DocumentModel.id.in_(query.scope.document_ids))
     return statement
 
 

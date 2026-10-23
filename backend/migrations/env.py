@@ -15,9 +15,9 @@ from research_agent.discovery import models as discovery_models  # noqa: F401
 from research_agent.ingestion import models as ingestion_models  # noqa: F401
 from research_agent.notes import models as note_models  # noqa: F401
 from research_agent.papers import models as paper_models  # noqa: F401
+from research_agent.research import models as research_models  # noqa: F401
 from research_agent.retrieval import models as retrieval_models  # noqa: F401
 from research_agent.shared.db import Base
-
 
 config = context.config
 

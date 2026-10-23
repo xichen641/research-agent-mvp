@@ -30,6 +30,7 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
         </Link>
 
         <nav aria-label="工作台导航" className="mt-8 space-y-1">
+          <WorkspaceLink href="/research" label="研究空间" active={pathname.startsWith("/research")} icon="library" />
           <WorkspaceLink
             href="/papers"
             label="论文工作台"
@@ -97,8 +98,8 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
             <span className="grid size-8 place-items-center rounded-lg bg-blue-600 text-sm text-white">R</span>
             ResearchAgent
           </Link>
-          <Link href="/papers" className="text-sm font-medium text-blue-700">
-            论文工作台
+          <Link href="/research" className="text-sm font-medium text-blue-700">
+            研究空间
           </Link>
         </header>
         {children}

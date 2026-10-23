@@ -1,4 +1,5 @@
 import { ChatWorkspace } from "@/features/chat/chat-workspace";
+import { SessionResearchPanel } from "@/features/research/session-research-panel";
 
 export default async function ChatPage({
   params,
@@ -19,6 +20,7 @@ export default async function ChatPage({
             仅在引用校验完成后展示回答，并明确区分论文证据与模型补充。
           </p>
         </header>
+        <SessionResearchPanel sessionId={sessionId} />
         <ChatWorkspace sessionId={sessionId} />
       </div>
     </main>

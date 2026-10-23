@@ -66,6 +66,7 @@ class ChatSessionResponse(BaseModel):
     id: UUID
     title: str
     document_ids: list[UUID]
+    research_space_id: UUID | None = None
 
 
 class CreateChatMessageRequest(BaseModel):
@@ -183,11 +184,27 @@ async def list_chat_sessions(
                 id=session.id,
                 title=session.title,
                 document_ids=list(session.scope.document_ids),
+                research_space_id=session.research_space_id,
                 created_at=session.created_at,
                 updated_at=session.updated_at,
             )
             for session in sessions
         ]
+    )
+
+
+@router.get("/sessions/{session_id}", response_model=ChatSessionResponse)
+async def get_chat_session(
+    session_id: UUID, history: Annotated[ChatHistory, Depends(get_chat_history)]
+) -> ChatSessionResponse:
+    record = await history.get_session(session_id)
+    if record is None:
+        raise AppError("CHAT_SESSION_NOT_FOUND", "Chat session was not found")
+    return ChatSessionResponse(
+        id=record.id,
+        title=record.title,
+        document_ids=list(record.scope.document_ids),
+        research_space_id=record.research_space_id,
     )
 
 

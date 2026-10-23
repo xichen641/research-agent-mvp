@@ -48,6 +48,38 @@ The default UI is <http://127.0.0.1:3000>, the API is
 <http://127.0.0.1:8000/health/ready>. The explicit loopback address avoids
 Windows `localhost` resolving to another IPv6-bound development service.
 
+## Research spaces
+
+Open <http://127.0.0.1:3000/research> or select **研究空间** in the navigation.
+Create a space with a research goal, task settings, resource constraints, and a
+current question. You can start a discussion immediately, including while papers
+are processing or before any papers have been linked. Each linked paper is pinned
+to a specific version; its processing state is visible in the space and discussion.
+An empty space has no paper evidence scope and never falls back to the full library.
+
+Edit the space to change settings or selected versions. Each save increments its
+revision and rejects stale edits. New turns use the current space settings and
+materials; a running turn retains its original settings and version scope.
+The settings are user-provided research context, not evidence of paper facts or
+completed experiments. Structured research records and automatic cross-session
+continuation of decisions and hypotheses are scheduled for later requirements.
+
+Use **归入旧会话** to explicitly adopt an unassigned, idle conversation. Its existing
+messages, answers, citations, and past runs remain intact. New questions use the
+space's settings. Existing conversations remain usable without a space association.
+
+For local acceptance: create a space, reload it, edit its resource constraint,
+associate a paper version, start a discussion, then adopt an old conversation.
+Confirm the revision, material status, and discussion history after reloading.
+Deploy into the existing Compose project to retain its database and object volumes;
+for the established local stack, use:
+
+```powershell
+docker compose -p research-agent-mvp -f infra/compose.yaml up -d --build
+```
+
+The additive `0010_research_spaces` migration runs before API/worker startup.
+
 Host ports are configurable through `API_HOST_PORT`, `WEB_HOST_PORT`,
 `POSTGRES_HOST_PORT`, `MINIO_HOST_PORT`, and `MINIO_CONSOLE_HOST_PORT`, so an
 isolated stack can run beside another local project.

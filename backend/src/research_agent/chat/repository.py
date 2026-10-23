@@ -26,6 +26,10 @@ from research_agent.chat.models import (
     ChatSessionModel,
 )
 from research_agent.papers.models import OutboxEventModel
+from research_agent.research.models import (
+    ResearchSpaceMaterialModel,
+    ResearchSpaceModel,
+)
 from research_agent.shared.errors import AppError
 from research_agent.shared.ids import new_id
 
@@ -130,7 +134,7 @@ class SqlChatRepository:
         model = ChatSessionModel(
             id=new_id(),
             title=title.strip(),
-            scope={"document_ids": [str(item) for item in scope.document_ids]},
+            scope=_scope_payload(scope),
         )
         try:
             self._session.add(model)
@@ -181,6 +185,8 @@ class SqlChatRepository:
             raise ValueError("question must not be blank")
         if retrieval_mode not in {"auto", "off", "on"}:
             raise ValueError("invalid retrieval mode")
+        research_context: dict[str, object] | None = None
+        space_scope: RetrievalScope | None = None
         try:
             chat_session = (
                 await self._session.scalars(
@@ -206,6 +212,39 @@ class SqlChatRepository:
                     "CHAT_RUN_IN_PROGRESS",
                     "Wait for the current chat turn to finish before starting another",
                 )
+            if chat_session.research_space_id is not None:
+                space = await self._session.scalar(
+                    select(ResearchSpaceModel)
+                    .where(ResearchSpaceModel.id == chat_session.research_space_id)
+                    .with_for_update()
+                )
+                if space is None:
+                    raise AppError(
+                        "RESEARCH_SPACE_NOT_FOUND", "Research space was not found"
+                    )
+                links = (
+                    await self._session.scalars(
+                        select(ResearchSpaceMaterialModel)
+                        .where(ResearchSpaceMaterialModel.space_id == space.id)
+                        .order_by(ResearchSpaceMaterialModel.document_id)
+                    )
+                ).all()
+                space_scope = RetrievalScope(
+                    document_ids=tuple(link.document_id for link in links),
+                    document_version_ids=tuple(
+                        link.document_version_id for link in links
+                    ),
+                    restrict_to_scope=True,
+                )
+                research_context = {
+                    "space_id": str(space.id),
+                    "revision": space.revision,
+                    "name": space.name,
+                    "goal": space.goal,
+                    "task_settings": space.task_settings,
+                    "resource_constraints": space.resource_constraints,
+                    "current_question": space.current_question,
+                }
             history_message_count = int(
                 await self._session.scalar(
                     select(func.count(ChatMessageModel.id)).where(
@@ -220,7 +259,7 @@ class SqlChatRepository:
         except SQLAlchemyError:
             await self._rollback_after_error()
             raise ChatPersistenceError() from None
-        resolved_scope = scope or _scope(chat_session.scope)
+        resolved_scope = space_scope or scope or _scope(chat_session.scope)
         chat_session.updated_at = func.now()
         run = ChatRunModel(
             id=new_id(),
@@ -228,7 +267,8 @@ class SqlChatRepository:
             status="QUEUED" if dispatch else "RUNNING",
             error_code=None,
             question=question.strip(),
-            scope={"document_ids": [str(item) for item in resolved_scope.document_ids]},
+            scope=_scope_payload(resolved_scope),
+            research_context=research_context,
             retrieval_mode=retrieval_mode,
             history_message_count=history_message_count,
             lease_expires_at=None,
@@ -599,9 +639,31 @@ class SqlChatRepository:
 
 def _scope(value: dict[str, object]) -> RetrievalScope:
     raw_ids = value.get("document_ids", [])
-    if not isinstance(raw_ids, list):
+    raw_versions = value.get("document_version_ids", [])
+    restricted = value.get("restrict_to_scope", False)
+    if (
+        not isinstance(raw_ids, list)
+        or not isinstance(raw_versions, list)
+        or not isinstance(restricted, bool)
+    ):
         raise ChatPersistenceError()
-    return RetrievalScope(tuple(UUID(str(item)) for item in raw_ids))
+    return RetrievalScope(
+        tuple(UUID(str(item)) for item in raw_ids),
+        tuple(UUID(str(item)) for item in raw_versions),
+        restricted,
+    )
+
+
+def _scope_payload(scope: RetrievalScope) -> dict[str, object]:
+    value: dict[str, object] = {
+        "document_ids": [str(item) for item in scope.document_ids]
+    }
+    if scope.restrict_to_scope or scope.document_version_ids:
+        value.update(
+            document_version_ids=[str(item) for item in scope.document_version_ids],
+            restrict_to_scope=scope.restrict_to_scope,
+        )
+    return value
 
 
 def _session_record(model: ChatSessionModel) -> ChatSessionRecord:
@@ -611,6 +673,7 @@ def _session_record(model: ChatSessionModel) -> ChatSessionRecord:
         scope=_scope(model.scope),
         created_at=model.created_at,
         updated_at=model.updated_at,
+        research_space_id=model.research_space_id,
     )
 
 
@@ -636,6 +699,7 @@ def _run_record(model: ChatRunModel) -> ChatRunRecord:
         scope=None if model.scope is None else _scope(model.scope),
         retrieval_mode=cast(RetrievalMode, model.retrieval_mode),
         history_message_count=model.history_message_count,
+        research_context=model.research_context,
     )
 
 

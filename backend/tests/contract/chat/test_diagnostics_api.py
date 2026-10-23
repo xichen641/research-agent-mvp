@@ -37,7 +37,7 @@ async def test_configuration_api_never_serializes_provider_credentials(
     assert response.json()["provider_host"] == "provider.example"
     assert "private-api-key" not in response.text
     assert "private-password" not in response.text
-    assert response.json()["capabilities"]["research_spaces"] is False
+    assert response.json()["capabilities"]["research_spaces"] is True
     assert response.json()["capabilities"]["cross_session_research_state"] is False
 
 

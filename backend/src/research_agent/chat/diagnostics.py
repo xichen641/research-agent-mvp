@@ -15,7 +15,7 @@ from research_agent.shared.errors import AppError
 class Capabilities(BaseModel):
     same_session_history: bool = True
     memory_compaction: bool = True
-    research_spaces: bool = False
+    research_spaces: bool = True
     cross_session_research_state: bool = False
     correctable_research_records: bool = False
 

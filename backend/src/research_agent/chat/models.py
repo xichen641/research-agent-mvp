@@ -12,7 +12,8 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID as PostgreSQLUUID
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PostgreSQLUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from research_agent.shared.db import Base
@@ -24,6 +25,16 @@ class ChatSessionModel(Base):
     id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
     title: Mapped[str] = mapped_column(Text)
     scope: Mapped[dict[str, object]] = mapped_column(JSONB)
+    research_space_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(
+            "research_space.id",
+            name="fk_chat_session_research_space",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+        index=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -84,6 +95,9 @@ class ChatRunModel(Base):
     error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
     question: Mapped[str | None] = mapped_column(Text, nullable=True)
     scope: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)
+    research_context: Mapped[dict[str, object] | None] = mapped_column(
+        JSONB, nullable=True
+    )
     retrieval_mode: Mapped[str] = mapped_column(String(16), default="auto")
     history_message_count: Mapped[int] = mapped_column(Integer, default=0)
     lease_expires_at: Mapped[datetime | None] = mapped_column(

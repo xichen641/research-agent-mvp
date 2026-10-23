@@ -5,14 +5,21 @@ from uuid import UUID
 @dataclass(frozen=True, slots=True)
 class RetrievalScope:
     document_ids: tuple[UUID, ...] = ()
+    document_version_ids: tuple[UUID, ...] = ()
+    restrict_to_scope: bool = False
 
     def __post_init__(self) -> None:
         # Checkpoint serializers reconstruct sequence fields from msgpack arrays.
         # Normalize at the domain boundary so resumed graph state retains the tuple
         # invariant declared by this value object.
         object.__setattr__(self, "document_ids", tuple(self.document_ids))
+        object.__setattr__(
+            self, "document_version_ids", tuple(self.document_version_ids)
+        )
         if len(set(self.document_ids)) != len(self.document_ids):
             raise ValueError("document scope contains duplicates")
+        if len(set(self.document_version_ids)) != len(self.document_version_ids):
+            raise ValueError("version scope contains duplicates")
 
 
 @dataclass(frozen=True, slots=True)

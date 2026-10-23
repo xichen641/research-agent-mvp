@@ -56,9 +56,10 @@ class ChatService:
             run_id=run.id,
             session_id=session_id,
             question=question,
-            scope=session.scope,
+            scope=run.scope or session.scope,
             retrieval_mode=retrieval_mode,
             history_message_count=run.history_message_count,
+            research_context=run.research_context,
         )
 
     async def execute(self, prepared: PreparedChatRun) -> ChatRunResult:
@@ -71,6 +72,7 @@ class ChatService:
                     "scope": prepared.scope,
                     "retrieval_mode": prepared.retrieval_mode,
                     "history_message_count": prepared.history_message_count,
+                    "research_context": prepared.research_context,
                     "warnings": [],
                 },
                 config={

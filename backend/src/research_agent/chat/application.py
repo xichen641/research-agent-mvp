@@ -1,7 +1,7 @@
 import asyncio
+import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
-import logging
 from uuid import UUID
 
 from langgraph.graph.state import CompiledStateGraph
@@ -17,7 +17,6 @@ from research_agent.chat.service import ChatService
 from research_agent.config import Settings
 from research_agent.retrieval.domain import RetrievalScope
 from research_agent.shared.errors import AppError
-
 
 logger = logging.getLogger(__name__)
 GraphBuilder = Callable[[SqlChatRepository, AsyncSession], CompiledStateGraph]
@@ -72,9 +71,10 @@ class ChatApplication:
                 run_id=run.id,
                 session_id=session_id,
                 question=question,
-                scope=chat_session.scope,
+                scope=run.scope or chat_session.scope,
                 retrieval_mode=retrieval_mode,
                 history_message_count=run.history_message_count,
+                research_context=run.research_context,
             )
 
         if self._dispatch_outbox:

@@ -1,3 +1,4 @@
+import json
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -103,6 +104,15 @@ def compile_chat_graph(
             history_message_count=state.get("history_message_count", 0),
         )
         turns = context_prompt_turns(context)
+        research_context = state.get("research_context")
+        if research_context is not None:
+            turns.append(
+                ChatTurn(
+                    role="user",
+                    content="当前研究空间设置，由用户填写；这是研究目标和约束，不是论文证据，也不代表实验已经完成。以此轮设置为准：\n"
+                    + json.dumps(research_context, ensure_ascii=False),
+                )
+            )
         await dependencies.chats.record_event(
             run_id=state["run_id"],
             event_type="context_assembled",

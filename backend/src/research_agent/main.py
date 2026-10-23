@@ -1,7 +1,7 @@
 import asyncio
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
-import logging
 from typing import AsyncContextManager, cast
 
 from fastapi import FastAPI, Request
@@ -13,13 +13,15 @@ from research_agent.chat.application import (
     chat_provider_configured,
     production_chat_application,
 )
-from research_agent.chat.routes import ChatCommands, router as chat_router
+from research_agent.chat.routes import ChatCommands
+from research_agent.chat.routes import router as chat_router
+from research_agent.config import get_settings
 from research_agent.discovery.routes import router as discovery_router
 from research_agent.health import ReadinessStates, check_readiness
 from research_agent.notes.routes import router as notes_router
 from research_agent.operations.metrics import collect_operational_metrics
 from research_agent.papers.routes import router as papers_router
-from research_agent.config import get_settings
+from research_agent.research.routes import router as research_router
 from research_agent.shared.db import async_session_factory
 from research_agent.shared.errors import AppError
 from research_agent.shared.ids import new_id
@@ -31,7 +33,6 @@ from research_agent.tasks.outbox_relay import (
 )
 from research_agent.tasks.recovery import SqlChatRunRecovery
 from research_agent.tasks.routes import router as tasks_router
-
 
 logger = logging.getLogger(__name__)
 RelayPass = Callable[[], Awaitable[object]]
@@ -151,6 +152,10 @@ def create_app(
             "INVALID_LAST_EVENT_ID": 400,
             "INVALID_CHAT_SCOPE": 400,
             "NOTE_NOT_FOUND": 404,
+            "RESEARCH_SPACE_NOT_FOUND": 404,
+            "INVALID_SPACE_MATERIAL": 400,
+            "RESEARCH_SPACE_REVISION_CONFLICT": 409,
+            "CHAT_SESSION_ALREADY_ASSIGNED": 409,
         }
         status = status_by_code.get(error.code, 503 if error.retryable else 500)
         return JSONResponse(
@@ -198,6 +203,7 @@ def create_app(
     app.include_router(chat_router, prefix="/api/v1")
     app.include_router(discovery_router, prefix="/api/v1")
     app.include_router(notes_router, prefix="/api/v1")
+    app.include_router(research_router, prefix="/api/v1")
 
     return app
 

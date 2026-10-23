@@ -95,7 +95,7 @@ async def test_postgres_retrieval_filters_scope_ready_current_and_active_space(
         sha="1" * 64,
         status=DocumentStatus.READY,
     )
-    other_document, other_version = await create_paper(
+    _other_document, other_version = await create_paper(
         db_session,
         title="Other ready",
         sha="2" * 64,
@@ -258,6 +258,34 @@ async def test_postgres_retrieval_filters_scope_ready_current_and_active_space(
     )
     chinese = await repository.lexical_search(chinese_query, limit=10)
     assert [candidate.chunk_id for candidate in chinese] == [chinese_chunk]
+
+    # An explicitly pinned historical version remains readable after a new current
+    # version is selected; both recall branches must honor the same boundary.
+    pinned = RetrievalQuery(
+        original="occlusion",
+        lexical_queries=("occlusion",),
+        semantic_query="occlusion",
+        scope=RetrievalScope(
+            document_ids=(scoped_document,),
+            document_version_ids=(historical_version,),
+            restrict_to_scope=True,
+        ),
+    )
+    assert [
+        item.chunk_id for item in await repository.lexical_search(pinned, limit=10)
+    ] == [historical_chunk]
+    assert [
+        item.chunk_id
+        for item in await repository.vector_search(pinned, vector(1.0), limit=10)
+    ] == [historical_chunk]
+    empty = RetrievalQuery(
+        original="occlusion",
+        lexical_queries=("occlusion",),
+        semantic_query="occlusion",
+        scope=RetrievalScope(restrict_to_scope=True),
+    )
+    assert await repository.lexical_search(empty, limit=10) == []
+    assert await repository.vector_search(empty, vector(1.0), limit=10) == []
     assert chinese[0].content_type == "table"
 
     bilingual_query = RetrievalQuery(

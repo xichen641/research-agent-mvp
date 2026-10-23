@@ -94,6 +94,7 @@ class SequenceLLM:
     def __init__(self, responses: dict[str, list[dict[str, object]]]) -> None:
         self.responses = responses
         self.calls: list[str] = []
+        self.prompts: list[list[ChatTurn]] = []
 
     async def generate_structured(
         self,
@@ -102,7 +103,7 @@ class SequenceLLM:
         messages: list[ChatTurn],
         output_type,
     ):
-        del messages
+        self.prompts.append(messages)
         self.calls.append(operation)
         return output_type.model_validate(self.responses[operation].pop(0))
 
@@ -209,6 +210,51 @@ async def test_auto_mode_skips_rag_for_context_only_follow_up() -> None:
     assert answer.text == "We can refine the hypothesis before consulting papers."
     assert answer.blocks[0].type == "model_knowledge"
     assert chats.completed == answer
+
+
+@pytest.mark.asyncio
+async def test_space_settings_reach_planning_and_answer_as_user_context() -> None:
+    llm = SequenceLLM(
+        {
+            "plan_query": [
+                {
+                    "intent": "background",
+                    "original_query": "继续",
+                    "needs_retrieval": False,
+                }
+            ],
+            "generate_general_answer": [{"text": "先按 12GB 约束设计对照。"}],
+        }
+    )
+    chats = RecordingChats()
+    graph = compile_chat_graph(
+        GraphDependencies(
+            llm=llm,
+            retrieval=cast(CandidateRetriever, ForbiddenRetrieval()),
+            chats=cast(GraphChatRepository, chats),
+        )
+    )
+    await graph.ainvoke(
+        {
+            "session_id": uuid4(),
+            "run_id": uuid4(),
+            "question": "继续",
+            "scope": RetrievalScope(restrict_to_scope=True),
+            "research_context": {
+                "space_id": str(uuid4()),
+                "revision": 2,
+                "goal": "区分语义与容量",
+                "resource_constraints": "12GB",
+            },
+            "warnings": [],
+        }
+    )
+    assert llm.calls == ["plan_query", "generate_general_answer"]
+    for prompt in llm.prompts:
+        settings = next(turn for turn in prompt if "当前研究空间设置" in turn.content)
+        assert settings.role == "user"
+        assert "不是论文证据" in settings.content
+        assert "12GB" in settings.content and "区分语义与容量" in settings.content
 
 
 @pytest.mark.asyncio
