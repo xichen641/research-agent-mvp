@@ -2,7 +2,6 @@ import { apiRequest } from "@/lib/api";
 
 import type { ChatMessage, CitationData } from "./types";
 
-
 type ChatSessionWire = {
   id: string;
   title: string;
@@ -28,6 +27,8 @@ export type ChatSessionActivity = {
   status: ChatRunStatus | "IDLE";
   errorCode: string | null;
   streamUrl: string | null;
+  userMessageId?: string | null;
+  assistantMessageId?: string | null;
 };
 
 export async function createChatSession(
@@ -47,10 +48,12 @@ export async function createChatSession(
 }
 
 type ChatSessionListWire = {
-  items: Array<ChatSessionWire & {
-    created_at: string;
-    updated_at: string;
-  }>;
+  items: Array<
+    ChatSessionWire & {
+      created_at: string;
+      updated_at: string;
+    }
+  >;
 };
 
 export async function listChatSessions(): Promise<ChatSessionSummary[]> {
@@ -69,33 +72,49 @@ type ChatHistoryMessageWire = {
   role: "user" | "assistant";
   content: { text: string } | CitationData;
   created_at: string;
+  sequence?: number;
 };
 
 type ChatHistoryWire = {
   items: ChatHistoryMessageWire[];
+  next_before_sequence?: number | null;
 };
 
-export async function listChatMessages(sessionId: string): Promise<ChatMessage[]> {
+export async function listChatMessages(
+  sessionId: string,
+): Promise<ChatMessage[]> {
+  return (await getChatMessagePage(sessionId)).items;
+}
+
+export async function getChatMessagePage(
+  sessionId: string,
+  beforeSequence?: number,
+): Promise<{ items: ChatMessage[]; nextBeforeSequence: number | null }> {
   const history = await apiRequest<ChatHistoryWire>(
-    `/api/v1/chat/sessions/${sessionId}/messages`,
+    `/api/v1/chat/sessions/${sessionId}/messages${beforeSequence ? `?before_sequence=${beforeSequence}&limit=50` : ""}`,
   );
-  return history.items.map((item) => {
-    if (item.role === "user") {
+  return {
+    nextBeforeSequence: history.next_before_sequence ?? null,
+    items: history.items.map((item) => {
+      if (item.role === "user") {
+        return {
+          id: item.id,
+          role: "user",
+          text: "text" in item.content ? item.content.text : "",
+          ...(item.sequence !== undefined ? { sequence: item.sequence } : {}),
+        };
+      }
+      const content = item.content as CitationData;
       return {
         id: item.id,
-        role: "user",
-        text: "text" in item.content ? item.content.text : "",
+        role: "assistant",
+        blocks: content.blocks,
+        citations: content.citations,
+        streaming: false,
+        ...(item.sequence !== undefined ? { sequence: item.sequence } : {}),
       };
-    }
-    const content = item.content as CitationData;
-    return {
-      id: item.id,
-      role: "assistant",
-      blocks: content.blocks,
-      citations: content.citations,
-      streaming: false,
-    };
-  });
+    }),
+  };
 }
 
 type ChatSessionActivityWire = {
@@ -104,6 +123,8 @@ type ChatSessionActivityWire = {
   status: ChatRunStatus | "IDLE";
   error_code: string | null;
   stream_url: string | null;
+  user_message_id?: string | null;
+  assistant_message_id?: string | null;
 };
 
 export async function getChatSessionActivity(
@@ -118,5 +139,11 @@ export async function getChatSessionActivity(
     status: activity.status,
     errorCode: activity.error_code,
     streamUrl: activity.stream_url,
+    ...(activity.user_message_id !== undefined
+      ? { userMessageId: activity.user_message_id }
+      : {}),
+    ...(activity.assistant_message_id !== undefined
+      ? { assistantMessageId: activity.assistant_message_id }
+      : {}),
   };
 }

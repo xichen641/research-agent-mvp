@@ -27,6 +27,7 @@ export type UserChatMessage = {
   id: string;
   role: "user";
   text: string;
+  sequence?: number;
 };
 
 export type AssistantChatMessage = {
@@ -36,6 +37,7 @@ export type AssistantChatMessage = {
   citations?: Citation[];
   streamingText?: string;
   streaming?: boolean;
+  sequence?: number;
 };
 
 export type ChatMessage = UserChatMessage | AssistantChatMessage;

@@ -9,6 +9,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     func,
     text,
 )
@@ -48,6 +49,10 @@ class ChatMessageModel(Base):
     __table_args__ = (
         CheckConstraint("role IN ('user', 'assistant')", name="ck_chat_message_role"),
         Index("ix_chat_message_session_created", "session_id", "created_at", "id"),
+        UniqueConstraint(
+            "session_id", "sequence", name="uq_chat_message_session_sequence"
+        ),
+        CheckConstraint("sequence > 0", name="ck_chat_message_sequence"),
     )
 
     id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
@@ -56,6 +61,7 @@ class ChatMessageModel(Base):
         ForeignKey("chat_session.id", ondelete="CASCADE"),
     )
     role: Mapped[str] = mapped_column(String(16))
+    sequence: Mapped[int] = mapped_column(Integer)
     content: Mapped[dict[str, object]] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -78,6 +84,9 @@ class ChatRunModel(Base):
             name="ck_chat_run_history_message_count",
         ),
         Index("ix_chat_run_session_created", "session_id", "created_at", "id"),
+        UniqueConstraint(
+            "session_id", "client_request_id", name="uq_chat_run_client_request"
+        ),
         Index(
             "uq_chat_run_one_active_per_session",
             "session_id",
@@ -92,6 +101,34 @@ class ChatRunModel(Base):
         ForeignKey("chat_session.id", ondelete="CASCADE"),
     )
     status: Mapped[str] = mapped_column(String(16))
+    client_request_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=True
+    )
+    user_message_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(
+            "chat_message.id", name="fk_chat_run_user_message", ondelete="SET NULL"
+        ),
+        nullable=True,
+    )
+    assistant_message_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(
+            "chat_message.id", name="fk_chat_run_assistant_message", ondelete="SET NULL"
+        ),
+        nullable=True,
+    )
+    retry_of_run_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("chat_run.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    memory_snapshot: Mapped[dict[str, object] | None] = mapped_column(
+        JSONB, nullable=True
+    )
+    context_snapshot: Mapped[dict[str, object] | None] = mapped_column(
+        JSONB, nullable=True
+    )
     error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
     question: Mapped[str | None] = mapped_column(Text, nullable=True)
     scope: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)

@@ -1,6 +1,6 @@
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable
 import json
+from collections.abc import AsyncIterator, Awaitable, Callable
 from time import monotonic
 from typing import Protocol
 from uuid import UUID
@@ -12,7 +12,6 @@ from research_agent.chat.domain import (
     VerifiedAnswer,
 )
 from research_agent.shared.errors import AppError
-
 
 Sleep = Callable[[float], Awaitable[object]]
 UIPart = dict[str, object]
@@ -72,7 +71,9 @@ class PersistedChatStream:
             await self._repository.append_events_if_absent(
                 run_id=run_id,
                 marker_event_type="ui_done",
-                events=answer_stream_events(run_id, answer),
+                events=answer_stream_events(
+                    run_id, answer, message_id=run.assistant_message_id
+                ),
             )
         elif run.status == "FAILED":
             await self._repository.append_events_if_absent(
@@ -157,10 +158,11 @@ def answer_stream_events(
     answer: VerifiedAnswer,
     *,
     delta_size: int = 256,
+    message_id: UUID | None = None,
 ) -> list[tuple[str, dict[str, object]]]:
     if delta_size <= 0:
         raise ValueError("delta size must be positive")
-    text_id = f"text-{run_id}"
+    text_id = str(message_id) if message_id is not None else f"text-{run_id}"
     display_text = answer.text or _insufficient_message(answer)
     parts: list[UIPart] = [
         {"type": "text-start", "id": text_id},

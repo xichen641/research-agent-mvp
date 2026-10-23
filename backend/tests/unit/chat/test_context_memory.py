@@ -78,6 +78,39 @@ def message(session_id: UUID, role: str, text: str) -> ChatMessageRecord:
 
 
 @pytest.mark.asyncio
+async def test_run_memory_snapshot_does_not_adopt_a_future_summary() -> None:
+    session_id = uuid4()
+    repository = MemoryRepository(
+        [
+            message(session_id, "user", "原问题"),
+            message(session_id, "assistant", "原回答"),
+            message(session_id, "user", "之后的问题"),
+        ]
+    )
+    repository.memory = ConversationMemoryRecord(
+        session_id=session_id,
+        summary="未来的摘要",
+        durable_facts=("未来的约束",),
+        covered_message_count=3,
+        revision=8,
+        updated_at=datetime.now(UTC),
+    )
+    context = await ConversationMemoryService(repository, MemoryLLM()).build_snapshot(
+        session_id=session_id,
+        history_message_count=2,
+        snapshot={
+            "summary": "旧摘要",
+            "durable_facts": ["24GB"],
+            "covered_message_count": 1,
+            "revision": 1,
+        },
+    )
+    assert context.memory_summary == "旧摘要"
+    assert context.durable_facts == ("24GB",)
+    assert [turn.content for turn in context.messages] == ["原回答"]
+
+
+@pytest.mark.asyncio
 async def test_context_uses_only_messages_that_precede_current_run() -> None:
     session_id = uuid4()
     repository = MemoryRepository(

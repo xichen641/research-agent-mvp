@@ -54,6 +54,8 @@ class ChatApplication:
         session_id: UUID,
         question: str,
         retrieval_mode: RetrievalMode = "auto",
+        client_request_id: UUID | None = None,
+        retry_of_run_id: UUID | None = None,
     ) -> UUID:
         async with self._session_factory() as session:
             repository = SqlChatRepository(session)
@@ -66,6 +68,8 @@ class ChatApplication:
                 scope=chat_session.scope,
                 retrieval_mode=retrieval_mode,
                 dispatch=self._dispatch_outbox,
+                client_request_id=client_request_id,
+                retry_of_run_id=retry_of_run_id,
             )
             prepared = PreparedChatRun(
                 run_id=run.id,
@@ -75,9 +79,10 @@ class ChatApplication:
                 retrieval_mode=retrieval_mode,
                 history_message_count=run.history_message_count,
                 research_context=run.research_context,
+                memory_snapshot=run.memory_snapshot,
             )
 
-        if self._dispatch_outbox:
+        if self._dispatch_outbox or run.replayed:
             return run.id
         if self._graph_builder is None:
             raise RuntimeError("inline chat execution requires a graph builder")
@@ -85,6 +90,19 @@ class ChatApplication:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return run.id
+
+    async def retry(self, *, run_id: UUID, client_request_id: UUID) -> UUID:
+        async with self._session_factory() as session:
+            original = await SqlChatRepository(session).get_run(run_id)
+        if original is None or original.question is None:
+            raise AppError("CHAT_RUN_NOT_FOUND", "Chat run was not found")
+        return await self.start(
+            session_id=original.session_id,
+            question=original.question,
+            retrieval_mode=original.retrieval_mode,
+            client_request_id=client_request_id,
+            retry_of_run_id=run_id,
+        )
 
     async def shutdown(self) -> None:
         tasks = list(self._tasks)

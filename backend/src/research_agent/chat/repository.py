@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Protocol, cast, runtime_checkable
 from uuid import UUID
@@ -180,6 +181,8 @@ class SqlChatRepository:
         scope: RetrievalScope | None = None,
         retrieval_mode: RetrievalMode = "auto",
         dispatch: bool = False,
+        client_request_id: UUID | None = None,
+        retry_of_run_id: UUID | None = None,
     ) -> ChatRunRecord:
         if not question.strip():
             raise ValueError("question must not be blank")
@@ -199,6 +202,43 @@ class SqlChatRepository:
                 raise ChatSessionNotFoundError(
                     f"chat session {session_id} does not exist"
                 )
+            if client_request_id is not None:
+                existing = await self._session.scalar(
+                    select(ChatRunModel).where(
+                        ChatRunModel.session_id == session_id,
+                        ChatRunModel.client_request_id == client_request_id,
+                    )
+                )
+                if existing is not None:
+                    if (
+                        existing.question != question.strip()
+                        or existing.retrieval_mode != retrieval_mode
+                        or existing.retry_of_run_id != retry_of_run_id
+                    ):
+                        raise AppError(
+                            "CHAT_REQUEST_CONFLICT",
+                            "同一请求 ID 不能用于不同问题或重试任务",
+                        )
+                    record = replace(_run_record(existing), replayed=True)
+                    await self._session.commit()
+                    return record
+            original = None
+            if retry_of_run_id is not None:
+                original = await self._session.get(ChatRunModel, retry_of_run_id)
+                if original is None or original.session_id != session_id:
+                    raise AppError("CHAT_RUN_NOT_FOUND", "Chat run was not found")
+                if original.status not in ("FAILED", "CANCELLED"):
+                    raise AppError(
+                        "CHAT_RUN_NOT_RETRYABLE", "仅可重试已失败或已取消的任务"
+                    )
+                if (
+                    original.scope is None
+                    or original.memory_snapshot is None
+                    or original.user_message_id is None
+                ):
+                    raise AppError(
+                        "CHAT_RUN_NOT_RETRYABLE", "旧任务没有完整输入快照，请发起新提问"
+                    )
             active_run = await self._session.scalar(
                 select(ChatRunModel.id)
                 .where(
@@ -260,7 +300,22 @@ class SqlChatRepository:
             await self._rollback_after_error()
             raise ChatPersistenceError() from None
         resolved_scope = space_scope or scope or _scope(chat_session.scope)
+        memory = await self._session.get(ChatMemoryModel, session_id)
+        memory_snapshot: dict[str, object] = {
+            "summary": "" if memory is None else memory.summary,
+            "durable_facts": [] if memory is None else list(memory.durable_facts),
+            "covered_message_count": 0
+            if memory is None
+            else memory.covered_message_count,
+            "revision": 0 if memory is None else memory.revision,
+        }
+        if original is not None:
+            resolved_scope = _scope(original.scope or {})
+            research_context = original.research_context
+            history_message_count = original.history_message_count
+            memory_snapshot = original.memory_snapshot or {}
         chat_session.updated_at = func.now()
+        user_message_id = new_id() if original is None else original.user_message_id
         run = ChatRunModel(
             id=new_id(),
             session_id=session_id,
@@ -269,16 +324,30 @@ class SqlChatRepository:
             question=question.strip(),
             scope=_scope_payload(resolved_scope),
             research_context=research_context,
+            client_request_id=client_request_id,
+            user_message_id=user_message_id,
+            retry_of_run_id=retry_of_run_id,
+            memory_snapshot=memory_snapshot,
+            context_snapshot=None if original is None else original.context_snapshot,
             retrieval_mode=retrieval_mode,
             history_message_count=history_message_count,
             lease_expires_at=None,
             completed_at=None,
         )
         message = ChatMessageModel(
-            id=new_id(),
+            id=user_message_id,
             session_id=session_id,
             role="user",
             content={"text": question.strip()},
+            sequence=int(
+                await self._session.scalar(
+                    select(func.coalesce(func.max(ChatMessageModel.sequence), 0)).where(
+                        ChatMessageModel.session_id == session_id
+                    )
+                )
+                or 0
+            )
+            + 1,
         )
         event = ChatRunEventModel(
             run_id=run.id,
@@ -287,7 +356,10 @@ class SqlChatRepository:
             payload={},
         )
         try:
-            self._session.add_all([run, message])
+            if original is None:
+                self._session.add(message)
+                await self._session.flush()
+            self._session.add(run)
             # Flush the parent row before the event because no ORM relationship is
             # needed solely to communicate the database foreign-key dependency.
             # 先刷新父记录再写事件；无需仅为表达数据库外键而引入 ORM 关系。
@@ -381,6 +453,15 @@ class SqlChatRepository:
                 session_id=run.session_id,
                 role="assistant",
                 content=answer.model_dump(mode="json"),
+                sequence=int(
+                    await self._session.scalar(
+                        select(
+                            func.coalesce(func.max(ChatMessageModel.sequence), 0)
+                        ).where(ChatMessageModel.session_id == run.session_id)
+                    )
+                    or 0
+                )
+                + 1,
             )
             run.status = "SUCCEEDED"
             run.error_code = None
@@ -392,7 +473,10 @@ class SqlChatRepository:
                 event_type="run_completed",
                 payload={"message_id": str(message.id)},
             )
-            self._session.add_all([message, event])
+            self._session.add(message)
+            await self._session.flush()
+            run.assistant_message_id = message.id
+            self._session.add(event)
             await self._session.commit()
             await self._session.refresh(message)
         except (ChatSessionNotFoundError, AppError):
@@ -434,7 +518,7 @@ class SqlChatRepository:
         statement = (
             select(ChatMessageModel)
             .where(ChatMessageModel.session_id == session_id)
-            .order_by(ChatMessageModel.created_at, ChatMessageModel.id)
+            .order_by(ChatMessageModel.sequence)
         )
         try:
             models = (await self._session.scalars(statement)).all()
@@ -444,6 +528,42 @@ class SqlChatRepository:
             await self._rollback_after_error()
             raise ChatPersistenceError() from None
         return records
+
+    async def list_message_page(
+        self, session_id: UUID, *, before_sequence: int | None = None, limit: int = 50
+    ) -> tuple[list[ChatMessageRecord], int | None]:
+        if not 1 <= limit <= 200:
+            raise ValueError("message page limit must be between 1 and 200")
+        query = select(ChatMessageModel).where(
+            ChatMessageModel.session_id == session_id
+        )
+        if before_sequence is not None:
+            query = query.where(ChatMessageModel.sequence < before_sequence)
+        rows = list(
+            (
+                await self._session.scalars(
+                    query.order_by(ChatMessageModel.sequence.desc()).limit(limit + 1)
+                )
+            ).all()
+        )
+        more = len(rows) > limit
+        records = [_message_record(row) for row in reversed(rows[:limit])]
+        await self._session.commit()
+        return records, records[0].sequence if more and records else None
+
+    async def get_context_snapshot(self, run_id: UUID) -> dict[str, object] | None:
+        model = await self._session.get(ChatRunModel, run_id)
+        value = None if model is None else model.context_snapshot
+        await self._session.commit()
+        return value
+
+    async def save_context_snapshot(
+        self, run_id: UUID, value: dict[str, object]
+    ) -> None:
+        run = await self._lock_run(run_id)
+        if run.context_snapshot is None and run.status == "RUNNING":
+            run.context_snapshot = value
+        await self._session.commit()
 
     async def get_message(self, message_id: UUID) -> ChatMessageRecord | None:
         try:
@@ -684,6 +804,7 @@ def _message_record(model: ChatMessageModel) -> ChatMessageRecord:
         role=cast(ChatRole, model.role),
         content=model.content,
         created_at=model.created_at,
+        sequence=model.sequence,
     )
 
 
@@ -700,6 +821,11 @@ def _run_record(model: ChatRunModel) -> ChatRunRecord:
         retrieval_mode=cast(RetrievalMode, model.retrieval_mode),
         history_message_count=model.history_message_count,
         research_context=model.research_context,
+        client_request_id=model.client_request_id,
+        user_message_id=model.user_message_id,
+        assistant_message_id=model.assistant_message_id,
+        retry_of_run_id=model.retry_of_run_id,
+        memory_snapshot=model.memory_snapshot,
     )
 
 

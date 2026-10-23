@@ -156,6 +156,8 @@ def create_app(
             "INVALID_SPACE_MATERIAL": 400,
             "RESEARCH_SPACE_REVISION_CONFLICT": 409,
             "CHAT_SESSION_ALREADY_ASSIGNED": 409,
+            "CHAT_REQUEST_CONFLICT": 409,
+            "CHAT_RUN_NOT_RETRYABLE": 409,
         }
         status = status_by_code.get(error.code, 503 if error.retryable else 500)
         return JSONResponse(

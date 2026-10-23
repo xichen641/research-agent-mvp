@@ -1,6 +1,6 @@
+import unicodedata
 from dataclasses import dataclass
 from typing import Literal
-import unicodedata
 
 from pydantic import BaseModel, ConfigDict
 
@@ -13,7 +13,6 @@ from research_agent.chat.domain import (
     VerifiedPaperEvidenceBlock,
 )
 from research_agent.retrieval.domain import RetrievalCandidate
-
 
 CitationFailureReason = Literal[
     "CHUNK_NOT_RETRIEVED",

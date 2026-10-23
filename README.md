@@ -80,6 +80,22 @@ docker compose -p research-agent-mvp -f infra/compose.yaml up -d --build
 
 The additive `0010_research_spaces` migration runs before API/worker startup.
 
+## Recovering a discussion
+
+Each UI submission has a persistent client request ID. If its POST response is
+lost, use **恢复发送或连接** or reopen the discussion: the same ID returns the existing
+run and user message. Leaving a page does not cancel the worker. History loads the
+latest 50 messages; **加载更早消息** reads previous pages by stable message sequence.
+Streamed and restored answers use the same stored message identity.
+
+**重试失败任务** creates a linked run using the original question, user message,
+paper versions, space settings, history boundary, and memory snapshot. The old
+failure remains recorded. To change the question or use newer space settings,
+send a new question. Older runs without complete input snapshots require a new
+question. Cancellation is provided by a later requirement.
+Migration `0011_chat_idempotency` backfills sequences and message links while
+preserving existing message IDs and citation content.
+
 Host ports are configurable through `API_HOST_PORT`, `WEB_HOST_PORT`,
 `POSTGRES_HOST_PORT`, `MINIO_HOST_PORT`, and `MINIO_CONSOLE_HOST_PORT`, so an
 isolated stack can run beside another local project.

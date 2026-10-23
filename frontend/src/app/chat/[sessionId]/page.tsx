@@ -21,7 +21,7 @@ export default async function ChatPage({
           </p>
         </header>
         <SessionResearchPanel sessionId={sessionId} />
-        <ChatWorkspace sessionId={sessionId} />
+        <ChatWorkspace key={sessionId} sessionId={sessionId} />
       </div>
     </main>
   );

@@ -184,6 +184,7 @@ class ChatGraphState(TypedDict):
     retrieval_mode: RetrievalMode
     history_message_count: int
     research_context: NotRequired[dict[str, object] | None]
+    memory_snapshot: NotRequired[dict[str, object] | None]
     context: NotRequired[list[dict[str, str]]]
     memory_summary: NotRequired[str]
     memory_compacted: NotRequired[bool]
@@ -212,6 +213,7 @@ class ChatMessageRecord:
     role: ChatRole
     content: dict[str, object]
     created_at: datetime
+    sequence: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,6 +229,12 @@ class ChatRunRecord:
     retrieval_mode: RetrievalMode = "auto"
     history_message_count: int = 0
     research_context: dict[str, object] | None = None
+    client_request_id: UUID | None = None
+    user_message_id: UUID | None = None
+    assistant_message_id: UUID | None = None
+    retry_of_run_id: UUID | None = None
+    memory_snapshot: dict[str, object] | None = None
+    replayed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,6 +261,7 @@ class PreparedChatRun:
     retrieval_mode: RetrievalMode = "auto"
     history_message_count: int = 0
     research_context: dict[str, object] | None = None
+    memory_snapshot: dict[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)

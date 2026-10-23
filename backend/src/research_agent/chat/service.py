@@ -60,6 +60,7 @@ class ChatService:
             retrieval_mode=retrieval_mode,
             history_message_count=run.history_message_count,
             research_context=run.research_context,
+            memory_snapshot=run.memory_snapshot,
         )
 
     async def execute(self, prepared: PreparedChatRun) -> ChatRunResult:
@@ -73,6 +74,7 @@ class ChatService:
                     "retrieval_mode": prepared.retrieval_mode,
                     "history_message_count": prepared.history_message_count,
                     "research_context": prepared.research_context,
+                    "memory_snapshot": prepared.memory_snapshot,
                     "warnings": [],
                 },
                 config={

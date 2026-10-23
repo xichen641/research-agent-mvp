@@ -99,10 +99,33 @@ def compile_chat_graph(
     checkpointer: BaseCheckpointSaver[str] | None = None,
 ) -> CompiledStateGraph:
     async def load_context(state: ChatGraphState) -> dict[str, object]:
-        context = await dependencies.context.build(
-            session_id=state["session_id"],
-            history_message_count=state.get("history_message_count", 0),
-        )
+        reader = getattr(dependencies.chats, "get_context_snapshot", None)
+        cached = await reader(state["run_id"]) if reader else None
+        if cached is not None:
+            await dependencies.chats.record_event(
+                run_id=state["run_id"],
+                event_type="context_assembled",
+                payload={
+                    "recent_message_count": len(cached.get("context", [])),
+                    "memory_present": bool(cached.get("memory_summary")),
+                    "memory_compacted": False,
+                    "snapshot_reused": True,
+                },
+            )
+            return cached
+        snapshot_builder = getattr(dependencies.context, "build_snapshot", None)
+        memory_snapshot = state.get("memory_snapshot")
+        if snapshot_builder and memory_snapshot is not None:
+            context = await snapshot_builder(
+                session_id=state["session_id"],
+                history_message_count=state.get("history_message_count", 0),
+                snapshot=memory_snapshot,
+            )
+        else:
+            context = await dependencies.context.build(
+                session_id=state["session_id"],
+                history_message_count=state.get("history_message_count", 0),
+            )
         turns = context_prompt_turns(context)
         research_context = state.get("research_context")
         if research_context is not None:
@@ -122,11 +145,15 @@ def compile_chat_graph(
                 "memory_compacted": context.compacted,
             },
         )
-        return {
+        assembled: dict[str, object] = {
             "context": [{"role": turn.role, "content": turn.content} for turn in turns],
             "memory_summary": context.memory_summary,
             "memory_compacted": context.compacted,
         }
+        writer = getattr(dependencies.chats, "save_context_snapshot", None)
+        if writer:
+            await writer(state["run_id"], {**assembled, "memory_compacted": False})
+        return assembled
 
     async def plan_query(state: ChatGraphState) -> dict[str, object]:
         plan = await dependencies.llm.generate_structured(

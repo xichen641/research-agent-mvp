@@ -61,6 +61,7 @@ async def run_chat_job(run_id: UUID) -> None:
                 retrieval_mode=run.retrieval_mode,
                 history_message_count=run.history_message_count,
                 research_context=run.research_context,
+                memory_snapshot=run.memory_snapshot,
             )
             try:
                 try:

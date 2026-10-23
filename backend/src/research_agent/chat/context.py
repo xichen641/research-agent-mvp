@@ -141,6 +141,58 @@ class ConversationMemoryService:
             durable_facts=() if memory is None else memory.durable_facts,
         )
 
+    async def build_snapshot(
+        self,
+        *,
+        session_id: UUID,
+        history_message_count: int,
+        snapshot: dict[str, object],
+    ) -> ConversationContext:
+        """Use the memory projection captured at submission, never a later revision."""
+        history = (await self._repository.list_messages(session_id))[
+            :history_message_count
+        ]
+        covered = int(str(snapshot.get("covered_message_count", 0)))
+        summary = str(snapshot.get("summary", ""))
+        raw_facts = snapshot.get("durable_facts", [])
+        facts = (
+            tuple(item for item in raw_facts if isinstance(item, str))
+            if isinstance(raw_facts, list)
+            else ()
+        )
+        if covered > len(history):
+            covered, summary, facts = 0, "", ()
+        recent = history[covered:]
+        if not self._needs_compaction(summary, facts, recent):
+            return ConversationContext(
+                messages=tuple(_chat_turn(item) for item in recent),
+                memory_summary=summary,
+                durable_facts=facts,
+            )
+        start = _recent_start(recent, self._recent_message_tokens)
+        if start == 0:
+            return ConversationContext(
+                messages=tuple(_chat_turn(item) for item in recent),
+                memory_summary=summary,
+                durable_facts=facts,
+            )
+        draft = await self._compress(
+            previous_summary=summary, durable_facts=facts, messages=recent[:start]
+        )
+        saved = await self._repository.save_memory(
+            session_id=session_id,
+            summary=draft.summary,
+            durable_facts=tuple(draft.durable_facts),
+            covered_message_count=covered + start,
+            expected_revision=int(str(snapshot.get("revision", 0))),
+        )
+        return ConversationContext(
+            messages=tuple(_chat_turn(item) for item in recent[start:]),
+            memory_summary=draft.summary,
+            durable_facts=tuple(draft.durable_facts),
+            compacted=saved is not None,
+        )
+
     def _needs_compaction(
         self,
         summary: str,

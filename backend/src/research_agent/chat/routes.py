@@ -44,7 +44,10 @@ class ChatCommands(Protocol):
         session_id: UUID,
         question: str,
         retrieval_mode: RetrievalMode = "auto",
+        client_request_id: UUID | None = None,
     ) -> UUID: ...
+
+    async def retry(self, *, run_id: UUID, client_request_id: UUID) -> UUID: ...
 
 
 class ChatHistory(Protocol):
@@ -55,6 +58,12 @@ class ChatHistory(Protocol):
     async def list_messages(self, session_id: UUID) -> list[ChatMessageRecord]: ...
 
     async def get_latest_run(self, session_id: UUID) -> ChatRunRecord | None: ...
+
+    async def get_run(self, run_id: UUID) -> ChatRunRecord | None: ...
+
+    async def list_message_page(
+        self, session_id: UUID, *, before_sequence: int | None = None, limit: int = 50
+    ) -> tuple[list[ChatMessageRecord], int | None]: ...
 
 
 class CreateChatSessionRequest(BaseModel):
@@ -72,11 +81,18 @@ class ChatSessionResponse(BaseModel):
 class CreateChatMessageRequest(BaseModel):
     question: str = Field(min_length=1, max_length=20_000)
     retrieval_mode: RetrievalMode = "auto"
+    client_request_id: UUID | None = None
+
+
+class RetryChatRunRequest(BaseModel):
+    client_request_id: UUID
 
 
 class ChatRunAcceptedResponse(BaseModel):
     run_id: UUID
     stream_url: str
+    user_message_id: UUID | None = None
+    assistant_message_id: UUID | None = None
 
 
 class ChatHistoryMessageResponse(BaseModel):
@@ -84,10 +100,12 @@ class ChatHistoryMessageResponse(BaseModel):
     role: ChatRole
     content: dict[str, object]
     created_at: datetime
+    sequence: int
 
 
 class ChatHistoryResponse(BaseModel):
     items: list[ChatHistoryMessageResponse]
+    next_before_sequence: int | None = None
 
 
 class ChatSessionSummaryResponse(ChatSessionResponse):
@@ -105,6 +123,8 @@ class ChatSessionActivityResponse(BaseModel):
     status: ChatRunStatus | Literal["IDLE"]
     error_code: str | None = None
     stream_url: str | None = None
+    user_message_id: UUID | None = None
+    assistant_message_id: UUID | None = None
 
 
 def get_chat_stream_service(
@@ -215,11 +235,17 @@ async def get_chat_session(
 async def list_chat_messages(
     session_id: UUID,
     history: Annotated[ChatHistory, Depends(get_chat_history)],
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    before_sequence: Annotated[int | None, Query(ge=1)] = None,
 ) -> ChatHistoryResponse:
     if await history.get_session(session_id) is None:
         raise AppError("CHAT_SESSION_NOT_FOUND", "Chat session was not found")
-    records = await history.list_messages(session_id)
-    return ChatHistoryResponse(items=[_history_message(item) for item in records])
+    records, cursor = await history.list_message_page(
+        session_id, before_sequence=before_sequence, limit=limit
+    )
+    return ChatHistoryResponse(
+        items=[_history_message(item) for item in records], next_before_sequence=cursor
+    )
 
 
 @router.get(
@@ -241,6 +267,8 @@ async def get_chat_session_activity(
         status=run.status,
         error_code=run.error_code,
         stream_url=f"/api/v1/chat/runs/{run.id}/stream",
+        user_message_id=run.user_message_id,
+        assistant_message_id=run.assistant_message_id,
     )
 
 
@@ -248,6 +276,7 @@ async def get_chat_session_activity(
     "/sessions/{session_id}/messages",
     status_code=status.HTTP_202_ACCEPTED,
     response_model=ChatRunAcceptedResponse,
+    response_model_exclude_none=True,
 )
 async def create_chat_message(
     session_id: UUID,
@@ -255,17 +284,61 @@ async def create_chat_message(
     request: Request,
     commands: Annotated[ChatCommands, Depends(get_chat_commands)],
     stream: Annotated[ChatStream, Depends(get_chat_stream_service)],
+    history: Annotated[ChatHistory, Depends(get_chat_history)],
 ) -> ChatRunAcceptedResponse | StreamingResponse:
-    run_id = await commands.start(
-        session_id=session_id,
-        question=body.question,
-        retrieval_mode=body.retrieval_mode,
-    )
+    if body.client_request_id is None:
+        run_id = await commands.start(
+            session_id=session_id,
+            question=body.question,
+            retrieval_mode=body.retrieval_mode,
+        )
+    else:
+        run_id = await commands.start(
+            session_id=session_id,
+            question=body.question,
+            retrieval_mode=body.retrieval_mode,
+            client_request_id=body.client_request_id,
+        )
     stream_url = f"/api/v1/chat/runs/{run_id}/stream"
     if "text/event-stream" not in request.headers.get("accept", ""):
-        return ChatRunAcceptedResponse(run_id=run_id, stream_url=stream_url)
+        record = (
+            await history.get_run(run_id)
+            if body.client_request_id is not None
+            else None
+        )
+        return ChatRunAcceptedResponse(
+            run_id=run_id,
+            stream_url=stream_url,
+            user_message_id=None if record is None else record.user_message_id,
+            assistant_message_id=None
+            if record is None
+            else record.assistant_message_id,
+        )
     await stream.prepare(run_id)
     return _streaming_response(stream.iter_sse(run_id))
+
+
+@router.post(
+    "/runs/{run_id}/retry",
+    status_code=202,
+    response_model=ChatRunAcceptedResponse,
+    response_model_exclude_none=True,
+)
+async def retry_chat_run(
+    run_id: UUID,
+    body: RetryChatRunRequest,
+    commands: Annotated[ChatCommands, Depends(get_chat_commands)],
+    history: Annotated[ChatHistory, Depends(get_chat_history)],
+) -> ChatRunAcceptedResponse:
+    new_id = await commands.retry(
+        run_id=run_id, client_request_id=body.client_request_id
+    )
+    record = await history.get_run(new_id)
+    return ChatRunAcceptedResponse(
+        run_id=new_id,
+        stream_url=f"/api/v1/chat/runs/{new_id}/stream",
+        user_message_id=None if record is None else record.user_message_id,
+    )
 
 
 @router.get("/runs/{run_id}/stream")
@@ -327,4 +400,5 @@ def _history_message(record: ChatMessageRecord) -> ChatHistoryMessageResponse:
         role=record.role,
         content=content,
         created_at=record.created_at,
+        sequence=record.sequence,
     )

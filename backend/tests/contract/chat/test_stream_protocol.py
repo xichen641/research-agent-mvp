@@ -4,7 +4,6 @@ from uuid import uuid4
 import httpx
 import pytest
 
-from research_agent.chat.routes import get_chat_history, get_chat_stream_service
 from research_agent.chat.domain import (
     ChatMessageRecord,
     ChatRunRecord,
@@ -13,9 +12,10 @@ from research_agent.chat.domain import (
     RetrievalMode,
     VerifiedAnswer,
 )
-from research_agent.retrieval.domain import RetrievalScope
+from research_agent.chat.routes import get_chat_history, get_chat_stream_service
 from research_agent.chat.stream import sse_done, sse_part
 from research_agent.main import create_app
+from research_agent.retrieval.domain import RetrievalScope
 
 
 class SeededVerifiedStream:
@@ -112,6 +112,9 @@ class FakeChatHistory:
     async def list_messages(self, session_id):
         return self.messages if session_id == self.session_id else []
 
+    async def list_message_page(self, session_id, *, before_sequence=None, limit=50):
+        return (await self.list_messages(session_id))[:limit], None
+
     async def get_latest_run(self, session_id):
         return self.latest_run if session_id == self.session_id else None
 
@@ -197,9 +200,7 @@ async def test_chat_history_restores_persisted_turns() -> None:
     items = response.json()["items"]
     assert items[0]["content"] == {"text": "Remember this decision"}
     assert items[1]["content"] == {
-        "blocks": [
-            {"type": "model_knowledge", "text": "The decision is durable."}
-        ],
+        "blocks": [{"type": "model_knowledge", "text": "The decision is durable."}],
         "citations": [],
         "warnings": [],
     }
@@ -248,6 +249,8 @@ async def test_chat_session_activity_exposes_a_reconnectable_run() -> None:
         "status": "RUNNING",
         "error_code": None,
         "stream_url": f"/api/v1/chat/runs/{history.latest_run.id}/stream",
+        "user_message_id": None,
+        "assistant_message_id": None,
     }
 
 
