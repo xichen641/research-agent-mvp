@@ -1,9 +1,10 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from research_agent.providers.context_budget import ContextBudgetPolicy
 
 _REPOSITORY_ENV = Path(__file__).resolve().parents[3] / ".env"
 
@@ -34,6 +35,9 @@ class Settings(BaseSettings):
     llm_timeout_seconds: float = 180.0
     memory_max_context_tokens: int = 6_000
     memory_recent_message_tokens: int = 2_500
+    chat_context_budget: ContextBudgetPolicy = Field(
+        default_factory=ContextBudgetPolicy
+    )
     chat_run_lease_seconds: int = 1_800
     chat_recovery_batch_size: int = 20
     chat_evidence_limit: int = 6

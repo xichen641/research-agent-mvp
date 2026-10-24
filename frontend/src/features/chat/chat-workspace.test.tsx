@@ -14,6 +14,36 @@ afterEach(() => {
   window.localStorage.clear();
 });
 
+it("restores the saved context warning when reopening a completed discussion", async () => {
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    if (String(input).endsWith("/messages")) {
+      return Response.json({
+        items: [{
+          id: "answer",
+          sequence: 2,
+          role: "assistant",
+          content: {
+            blocks: [{ type: "model_knowledge", text: "当前显存12GB。" }],
+            citations: [],
+            warnings: ["CONTEXT_COMPACTION_FALLBACK"],
+          },
+          created_at: "2026-10-24T00:00:00Z",
+        }],
+      });
+    }
+    return Response.json({
+      session_id: "session-1",
+      run_id: "run-1",
+      status: "SUCCEEDED",
+      error_code: null,
+      stream_url: null,
+    });
+  }));
+  render(<ChatWorkspace sessionId="session-1" />);
+  expect(await screen.findByText(/本轮只使用了部分讨论上下文/)).toBeVisible();
+  expect(screen.queryByText("回答带有校验警告，请检查引用原文。")).not.toBeInTheDocument();
+});
+
 it("shows the user question immediately and renders answer deltas before completion", async () => {
   const encoder = new TextEncoder();
   let finishStream: (() => void) | undefined;

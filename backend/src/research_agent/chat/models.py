@@ -129,6 +129,9 @@ class ChatRunModel(Base):
     context_snapshot: Mapped[dict[str, object] | None] = mapped_column(
         JSONB, nullable=True
     )
+    request_snapshots: Mapped[dict[str, object] | None] = mapped_column(
+        JSONB, nullable=True
+    )
     error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
     question: Mapped[str | None] = mapped_column(Text, nullable=True)
     scope: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)
@@ -185,6 +188,8 @@ class ChatMemoryModel(Base):
     summary: Mapped[str] = mapped_column(Text)
     durable_facts: Mapped[list[str]] = mapped_column(JSONB)
     covered_message_count: Mapped[int] = mapped_column(Integer)
+    covered_through_sequence: Mapped[int] = mapped_column(Integer, default=0)
+    critical_constraints: Mapped[list[str]] = mapped_column(JSONB, default=list)
     revision: Mapped[int] = mapped_column(Integer)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

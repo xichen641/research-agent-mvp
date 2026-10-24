@@ -33,11 +33,13 @@ class RuntimeConfiguration(BaseModel):
     chat_evidence_limit: int
     memory_max_context_tokens: int
     memory_recent_message_tokens: int
+    context_budget: dict[str, object] | None = None
     capabilities: Capabilities
 
 
 def runtime_configuration(settings: Settings) -> RuntimeConfiguration:
     return RuntimeConfiguration(
+        instrumentation="t1.3-v1",
         llm_model=settings.llm_model,
         provider_host=urlsplit(settings.llm_base_url).hostname,
         llm_timeout_seconds=settings.llm_timeout_seconds,
@@ -47,6 +49,7 @@ def runtime_configuration(settings: Settings) -> RuntimeConfiguration:
         chat_evidence_limit=settings.chat_evidence_limit,
         memory_max_context_tokens=settings.memory_max_context_tokens,
         memory_recent_message_tokens=settings.memory_recent_message_tokens,
+        context_budget=settings.chat_context_budget.model_dump(mode="json"),
         capabilities=Capabilities(),
     )
 
@@ -60,8 +63,25 @@ class RunDiagnosticsReader(Protocol):
 
 
 EVENT_FIELDS = {
+    "model_result_reused": ("operation",),
     "run_started": (),
-    "context_assembled": ("recent_message_count", "memory_present", "memory_compacted"),
+    "context_assembled": (
+        "recent_message_count",
+        "memory_present",
+        "memory_compacted",
+        "snapshot_reused",
+        "history_messages_read",
+        "history_max_sequence",
+        "warning_count",
+    ),
+    "model_request_budget": (
+        "operation",
+        "attempt",
+        "estimated_input_units",
+        "output_reserved_tokens",
+        "context_window_units",
+        "estimator",
+    ),
     "query_planned": ("intent", "needs_retrieval", "retrieval_mode"),
     "retrieval_started": (),
     "retrieval_completed": ("candidate_count",),

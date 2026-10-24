@@ -96,6 +96,32 @@ question. Cancellation is provided by a later requirement.
 Migration `0011_chat_idempotency` backfills sequences and message links while
 preserving existing message IDs and citation content.
 
+Long discussions use fixed per-run history sequence and memory revision snapshots.
+Migration `0012_context_budget` adds incremental memory coverage, source-labelled
+user constraints and private immutable model-request snapshots. Retries also reuse
+the original budget policy, model alias, projected question and retrieved excerpts.
+Previously completed structured model results are reused to keep the same planning
+branch when a later stage fails.
+Snapshots stay in PostgreSQL; diagnostics expose only safe request-size measurements.
+
+`CHAT_CONTEXT_BUDGET` accepts a validated JSON object. Defaults allocate 32,768
+application units across system instructions (6,144), current question (4,096),
+space settings (2,048), raw user constraints (1,024), recent turns (4,096), older
+memory (2,048), paper excerpts (8,192), output (4,096) and envelope reserve (1,024).
+Input units count UTF-8 bytes plus serialized JSON, schema and message framing;
+these are conservative estimates, **not provider-native token measurements**.
+Every HTTP attempt, including schema repair, is checked with output reserved;
+native `max_tokens` also bounds generated output. Legacy `MEMORY_*_TOKENS` setting
+names now use these conservative byte units for compaction thresholds.
+
+Oversized inputs are processed in segments, with at most 32 structured preparation
+calls (each permits one HTTP retry),
+60 seconds and 8 history pages per turn. Summary overflow or preparation failure
+uses a bounded projection with a visible warning. Original messages remain readable
+through history pagination. Only actual raw paper prefixes can be cited; shortened
+discussion memory and space settings never become paper evidence. Cross-session
+structured research records are part of the next iteration.
+
 Host ports are configurable through `API_HOST_PORT`, `WEB_HOST_PORT`,
 `POSTGRES_HOST_PORT`, `MINIO_HOST_PORT`, and `MINIO_CONSOLE_HOST_PORT`, so an
 isolated stack can run beside another local project.

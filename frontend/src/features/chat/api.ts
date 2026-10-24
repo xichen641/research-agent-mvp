@@ -89,11 +89,20 @@ export async function listChatMessages(
 export async function getChatMessagePage(
   sessionId: string,
   beforeSequence?: number,
-): Promise<{ items: ChatMessage[]; nextBeforeSequence: number | null }> {
+): Promise<{
+  items: ChatMessage[];
+  nextBeforeSequence: number | null;
+  warnings: string[];
+}> {
   const history = await apiRequest<ChatHistoryWire>(
     `/api/v1/chat/sessions/${sessionId}/messages${beforeSequence ? `?before_sequence=${beforeSequence}&limit=50` : ""}`,
   );
+  const latestAnswer = [...history.items]
+    .reverse()
+    .find((item) => item.role === "assistant")?.content;
   return {
+    warnings:
+      latestAnswer && "warnings" in latestAnswer ? latestAnswer.warnings ?? [] : [],
     nextBeforeSequence: history.next_before_sequence ?? null,
     items: history.items.map((item) => {
       if (item.role === "user") {

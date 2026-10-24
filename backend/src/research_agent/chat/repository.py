@@ -26,6 +26,7 @@ from research_agent.chat.models import (
     ChatRunModel,
     ChatSessionModel,
 )
+from research_agent.config import get_settings
 from research_agent.papers.models import OutboxEventModel
 from research_agent.research.models import (
     ResearchSpaceMaterialModel,
@@ -308,6 +309,28 @@ class SqlChatRepository:
             if memory is None
             else memory.covered_message_count,
             "revision": 0 if memory is None else memory.revision,
+            "covered_through_sequence": 0
+            if memory is None
+            else memory.covered_through_sequence,
+            "critical_constraints": []
+            if memory is None
+            else memory.critical_constraints,
+            "history_max_sequence": int(
+                await self._session.scalar(
+                    select(func.coalesce(func.max(ChatMessageModel.sequence), 0)).where(
+                        ChatMessageModel.session_id == session_id
+                    )
+                )
+                or 0
+            ),
+            "context_budget": get_settings().chat_context_budget.model_dump(
+                mode="json"
+            ),
+            "graph_version": "t1.3-v1",
+            "llm_model": get_settings().llm_model,
+            "research_records_revision": None,
+            "memory_max_context_units": get_settings().memory_max_context_tokens,
+            "memory_recent_units": get_settings().memory_recent_message_tokens,
         }
         if original is not None:
             resolved_scope = _scope(original.scope or {})
@@ -329,6 +352,7 @@ class SqlChatRepository:
             retry_of_run_id=retry_of_run_id,
             memory_snapshot=memory_snapshot,
             context_snapshot=None if original is None else original.context_snapshot,
+            request_snapshots=None if original is None else original.request_snapshots,
             retrieval_mode=retrieval_mode,
             history_message_count=history_message_count,
             lease_expires_at=None,
@@ -551,6 +575,72 @@ class SqlChatRepository:
         await self._session.commit()
         return records, records[0].sequence if more and records else None
 
+    async def list_history_slice(
+        self,
+        session_id: UUID,
+        *,
+        after_sequence: int,
+        through_sequence: int,
+        limit: int,
+        descending: bool = False,
+    ) -> list[ChatMessageRecord]:
+        if not 1 <= limit <= 200:
+            raise ValueError("history slice limit must be between 1 and 200")
+        query = select(ChatMessageModel).where(
+            ChatMessageModel.session_id == session_id,
+            ChatMessageModel.sequence > after_sequence,
+            ChatMessageModel.sequence <= through_sequence,
+        )
+        order = (
+            ChatMessageModel.sequence.desc()
+            if descending
+            else ChatMessageModel.sequence.asc()
+        )
+        rows = list(
+            (await self._session.scalars(query.order_by(order).limit(limit))).all()
+        )
+        records = [_message_record(row) for row in rows]
+        await self._session.commit()
+        return list(reversed(records)) if descending else records
+
+    async def history_sequence_at(self, session_id: UUID, count: int) -> int:
+        if count <= 0:
+            return 0
+        value = await self._session.scalar(
+            select(ChatMessageModel.sequence)
+            .where(ChatMessageModel.session_id == session_id)
+            .order_by(ChatMessageModel.sequence)
+            .offset(count - 1)
+            .limit(1)
+        )
+        await self._session.commit()
+        return int(value or 0)
+
+    async def get_prompt_snapshot(
+        self, run_id: UUID, key: str
+    ) -> dict[str, object] | None:
+        model = await self._session.get(ChatRunModel, run_id)
+        value = None if model is None else (model.request_snapshots or {}).get(key)
+        await self._session.commit()
+        return value if isinstance(value, dict) else None
+
+    async def save_prompt_snapshot(
+        self, run_id: UUID, key: str, value: dict[str, object]
+    ) -> dict[str, object]:
+        run = await self._lock_run(run_id)
+        snapshots = dict(run.request_snapshots or {})
+        if key not in snapshots:
+            if run.status != "RUNNING":
+                await self._session.rollback()
+                raise AppError("CHAT_RUN_NOT_RUNNING", "运行已停止，无法保存模型输入")
+            snapshots[key] = value
+            run.request_snapshots = snapshots
+        saved = snapshots[key]
+        await self._session.commit()
+        if not isinstance(saved, dict):
+            raise AppError("CHAT_INPUT_SNAPSHOT_INVALID", "模型输入快照无法读取")
+        return saved
+
     async def get_context_snapshot(self, run_id: UUID) -> dict[str, object] | None:
         model = await self._session.get(ChatRunModel, run_id)
         value = None if model is None else model.context_snapshot
@@ -682,6 +772,8 @@ class SqlChatRepository:
         durable_facts: tuple[str, ...],
         covered_message_count: int,
         expected_revision: int,
+        covered_through_sequence: int = 0,
+        critical_constraints: tuple[str, ...] = (),
     ) -> ConversationMemoryRecord | None:
         if not summary.strip():
             raise ValueError("memory summary must not be blank")
@@ -698,6 +790,19 @@ class SqlChatRepository:
             if chat_session is None:
                 raise ChatSessionNotFoundError(
                     f"chat session {session_id} does not exist"
+                )
+            if covered_message_count and covered_through_sequence == 0:
+                # Older callers only know ordinal coverage. Resolve its stable
+                # sequence under the session lock, without reading message text.
+                covered_through_sequence = int(
+                    await self._session.scalar(
+                        select(ChatMessageModel.sequence)
+                        .where(ChatMessageModel.session_id == session_id)
+                        .order_by(ChatMessageModel.sequence)
+                        .offset(covered_message_count - 1)
+                        .limit(1)
+                    )
+                    or 0
                 )
             model = (
                 await self._session.scalars(
@@ -716,6 +821,8 @@ class SqlChatRepository:
                     summary=summary.strip(),
                     durable_facts=list(durable_facts),
                     covered_message_count=covered_message_count,
+                    covered_through_sequence=covered_through_sequence,
+                    critical_constraints=list(critical_constraints),
                     revision=1,
                 )
                 self._session.add(model)
@@ -723,6 +830,8 @@ class SqlChatRepository:
                 model.summary = summary.strip()
                 model.durable_facts = list(durable_facts)
                 model.covered_message_count = covered_message_count
+                model.covered_through_sequence = covered_through_sequence
+                model.critical_constraints = list(critical_constraints)
                 model.revision += 1
                 model.updated_at = func.now()
             await self._session.commit()
@@ -850,4 +959,6 @@ def _memory_record(model: ChatMemoryModel) -> ConversationMemoryRecord:
         covered_message_count=model.covered_message_count,
         revision=model.revision,
         updated_at=model.updated_at,
+        covered_through_sequence=model.covered_through_sequence,
+        critical_constraints=tuple(model.critical_constraints),
     )

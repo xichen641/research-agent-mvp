@@ -111,8 +111,10 @@ export function useResearchChat(sessionId: string) {
         updatedAt: new Date().toISOString(),
       });
       const history = await getChatMessagePage(sessionId);
-      if (!signal?.aborted)
+      if (!signal?.aborted) {
         setMessages((current) => mergeMessages(current, history.items));
+        setWarnings(history.warnings);
+      }
     },
     [sessionId, setActivity],
   );
@@ -234,6 +236,11 @@ export function useResearchChat(sessionId: string) {
           await submitPending(pending, abort.signal);
           return;
         }
+        setWarnings(
+          activity.status === "SUCCEEDED" || activity.status === "IDLE"
+            ? history.warnings
+            : [],
+        );
         if (activity.status === "IDLE" || !activity.runId) return;
         runId.current = activity.runId;
         runFailed.current = activity.status === "FAILED";

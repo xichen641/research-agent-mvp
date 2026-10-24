@@ -185,6 +185,7 @@ class ChatGraphState(TypedDict):
     history_message_count: int
     research_context: NotRequired[dict[str, object] | None]
     memory_snapshot: NotRequired[dict[str, object] | None]
+    question_projection: NotRequired[str]
     context: NotRequired[list[dict[str, str]]]
     memory_summary: NotRequired[str]
     memory_compacted: NotRequired[bool]
@@ -272,3 +273,5 @@ class ConversationMemoryRecord:
     covered_message_count: int
     revision: int
     updated_at: datetime
+    covered_through_sequence: int = 0
+    critical_constraints: tuple[str, ...] = ()

@@ -149,7 +149,7 @@ async def test_long_history_is_compacted_and_recent_turns_remain_verbatim() -> N
     )
     llm = MemoryLLM()
     service = ConversationMemoryService(
-        repository, llm, max_context_tokens=45, recent_message_tokens=25
+        repository, llm, max_context_tokens=180, recent_message_tokens=100
     )
 
     context = await service.build(session_id=session_id, history_message_count=4)

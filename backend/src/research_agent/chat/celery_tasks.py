@@ -18,6 +18,10 @@ from research_agent.chat.graph import (
 from research_agent.chat.repository import SqlChatRepository
 from research_agent.chat.service import ChatService
 from research_agent.config import get_settings
+from research_agent.providers.context_budget import (
+    BudgetedLLMProvider,
+    ContextBudgetPolicy,
+)
 from research_agent.providers.openai_embeddings import build_openai_embedding_provider
 from research_agent.providers.qwen_llm import QwenLLMProvider
 from research_agent.providers.qwen_reranker import QwenRerankerProvider
@@ -64,11 +68,44 @@ async def run_chat_job(run_id: UUID) -> None:
                 memory_snapshot=run.memory_snapshot,
             )
             try:
+                captured_policy = (run.memory_snapshot or {}).get("context_budget")
+                policy = (
+                    settings.chat_context_budget
+                    if captured_policy is None
+                    else ContextBudgetPolicy.model_validate(captured_policy)
+                )
+                model_id = str(
+                    (run.memory_snapshot or {}).get("llm_model", settings.llm_model)
+                )
+                max_context = int(
+                    str(
+                        (run.memory_snapshot or {}).get(
+                            "memory_max_context_units",
+                            settings.memory_max_context_tokens,
+                        )
+                    )
+                )
+                recent_context = int(
+                    str(
+                        (run.memory_snapshot or {}).get(
+                            "memory_recent_units", settings.memory_recent_message_tokens
+                        )
+                    )
+                )
                 try:
                     await chats.record_event(
                         run_id=run_id,
                         event_type="runtime_configuration",
-                        payload=runtime_configuration(settings).model_dump(mode="json"),
+                        payload=runtime_configuration(settings)
+                        .model_copy(
+                            update={
+                                "context_budget": policy.model_dump(mode="json"),
+                                "llm_model": model_id,
+                                "memory_max_context_tokens": max_context,
+                                "memory_recent_message_tokens": recent_context,
+                            }
+                        )
+                        .model_dump(mode="json"),
                     )
                 except AppError:
                     logger.warning(
@@ -82,6 +119,21 @@ async def run_chat_job(run_id: UUID) -> None:
                         payload=observation.model_dump(mode="json"),
                     )
 
+                async def record_budget(measurement: dict[str, object]) -> None:
+                    await chats.record_event(
+                        run_id=run_id,
+                        event_type="model_request_budget",
+                        payload=measurement,
+                    )
+
+                async def record_reuse(measurement: dict[str, object]) -> None:
+                    if measurement.get("result_reused"):
+                        await chats.record_event(
+                            run_id=run_id,
+                            event_type="model_result_reused",
+                            payload={"operation": measurement["operation"]},
+                        )
+
                 async with (
                     httpx.AsyncClient(
                         timeout=settings.llm_timeout_seconds
@@ -93,12 +145,21 @@ async def run_chat_job(run_id: UUID) -> None:
                         serde=checkpoint_serializer(),
                     ) as saver,
                 ):
-                    llm = QwenLLMProvider(
+                    provider = QwenLLMProvider(
                         client=llm_client,
                         base_url=settings.llm_base_url,
                         api_key=settings.llm_api_key or settings.embedding_api_key,
-                        model_id=settings.llm_model,
+                        model_id=model_id,
                         observer=record_model_call,
+                        context_budget=policy,
+                        budget_observer=record_budget,
+                    )
+                    llm = BudgetedLLMProvider(
+                        provider,
+                        policy,
+                        store=chats,
+                        run_id=run_id,
+                        observer=record_reuse,
                     )
                     reranker = QwenRerankerProvider(
                         client=reranker_client,
@@ -118,8 +179,9 @@ async def run_chat_job(run_id: UUID) -> None:
                     context = ConversationMemoryService(
                         chats,
                         llm,
-                        max_context_tokens=settings.memory_max_context_tokens,
-                        recent_message_tokens=settings.memory_recent_message_tokens,
+                        max_context_tokens=max_context,
+                        recent_message_tokens=recent_context,
+                        policy=policy,
                     )
                     graph = compile_chat_graph(
                         GraphDependencies(

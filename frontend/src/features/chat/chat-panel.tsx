@@ -160,9 +160,11 @@ export function ChatPanel({
 
         {warnings.length > 0 && (
           <div role="alert" className="mt-5 rounded-xl bg-amber-100 px-4 py-3 text-sm text-amber-900">
-            {warnings.includes("INSUFFICIENT_PAPER_EVIDENCE")
-              ? "当前论文证据不足，请缩小问题或增加论文范围。"
-              : "回答带有校验警告，请检查引用原文。"}
+            {warnings.includes("INSUFFICIENT_PAPER_EVIDENCE") && <p>当前论文证据不足，请缩小问题或增加论文范围。</p>}
+            {warnings.includes("CONTEXT_INPUT_SEGMENTED") && <p>较长的输入已分段整理，原文仍可在对话中查看。</p>}
+            {warnings.some((warning) => ["CONTEXT_PREPARATION_FALLBACK", "CONTEXT_COMPACTION_FALLBACK", "CONTEXT_HISTORY_PARTIAL", "CONTEXT_MEMORY_SHORTENED", "CONTEXT_OPTIONAL_CONTENT_SHORTENED", "CONTEXT_CONSTRAINTS_PARTIAL"].includes(warning)) && <p>本轮只使用了部分讨论上下文，原文已保留；请核对关键约束，必要时缩小问题范围。</p>}
+            {warnings.includes("CONTEXT_EVIDENCE_SHORTENED") && <p>本轮使用了预算范围内的部分论文原文，可打开引用查看来源。</p>}
+            {warnings.some((warning) => !warning.startsWith("CONTEXT_") && warning !== "INSUFFICIENT_PAPER_EVIDENCE") && <p>回答带有校验警告，请检查引用原文。</p>}
           </div>
         )}
 

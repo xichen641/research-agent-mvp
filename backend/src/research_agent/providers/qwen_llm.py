@@ -8,7 +8,14 @@ from uuid import uuid4
 
 import httpx
 from pydantic import ValidationError
+
 from research_agent.config import Settings
+from research_agent.providers.context_budget import (
+    BudgetObserver,
+    ContextBudgetPolicy,
+    request_payload,
+    structured_messages,
+)
 from research_agent.providers.protocols import ChatTurn, OutputT
 from research_agent.providers.telemetry import (
     ModelCallObservation,
@@ -44,6 +51,8 @@ class QwenLLMProvider:
         api_key: str,
         model_id: str,
         observer: ModelCallObserver | None = None,
+        context_budget: ContextBudgetPolicy | None = None,
+        budget_observer: BudgetObserver | None = None,
     ) -> None:
         normalized_base_url = base_url.rstrip("/")
         if not normalized_base_url.startswith("https://"):
@@ -57,6 +66,8 @@ class QwenLLMProvider:
         self._api_key = api_key
         self.model_id = model_id
         self._observer = observer
+        self._context_budget = context_budget
+        self._budget_observer = budget_observer
 
     async def generate_structured(
         self,
@@ -67,23 +78,24 @@ class QwenLLMProvider:
     ) -> OutputT:
         if not operation.strip():
             raise ValueError("operation must not be blank")
-        schema = json.dumps(
-            output_type.model_json_schema(),
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        instruction = (
-            "Return exactly one valid JSON object and no markdown. "
-            f"Operation: {operation}. Output type: {output_type.__name__}. "
-            f"The JSON must satisfy this JSON Schema: {schema}"
-        )
-        request_messages: list[dict[str, str]] = [
-            {"role": "system", "content": instruction},
-            *[{"role": turn.role, "content": turn.content} for turn in messages],
-        ]
+        request_messages = structured_messages(operation, messages, output_type)
         # One bounded retry absorbs transient provider and schema failures.
         # 仅进行一次有界重试，用于吸收瞬时服务故障或结构化输出偏差。
         for attempt in range(2):
+            payload = request_payload(
+                self.model_id,
+                request_messages,
+                policy=self._context_budget,
+                operation=operation,
+            )
+            if self._context_budget is not None:
+                measurement = self._context_budget.check_payload(
+                    payload,
+                    operation=operation,
+                    attempt=attempt + 1,
+                )
+                if self._budget_observer is not None:
+                    await self._budget_observer(measurement)
             started_at = datetime.now(UTC)
             started = perf_counter()
             request_sha256 = hashlib.sha256(
@@ -140,15 +152,7 @@ class QwenLLMProvider:
                 response = await self._client.post(
                     self._endpoint,
                     headers={"Authorization": f"Bearer {self._api_key}"},
-                    json={
-                        "model": self.model_id,
-                        "messages": request_messages,
-                        "response_format": {"type": "json_object"},
-                        # Structured planning and cited-answer JSON do not need the
-                        # model's default long reasoning pass. Citation correctness
-                        # is enforced separately by the deterministic verifier.
-                        "enable_thinking": False,
-                    },
+                    json=payload,
                 )
             except httpx.HTTPError as error:
                 await observe("transport_error")
@@ -216,6 +220,7 @@ def build_qwen_llm(
         base_url=settings.llm_base_url,
         api_key=api_key,
         model_id=settings.llm_model,
+        context_budget=settings.chat_context_budget,
     )
 
 

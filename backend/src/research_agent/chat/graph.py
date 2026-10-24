@@ -1,7 +1,7 @@
 import json
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal, Protocol
 from uuid import UUID
 
@@ -10,6 +10,7 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
+from pydantic import TypeAdapter
 from sqlalchemy.engine import make_url
 
 from research_agent.chat.citations import CitationVerifier
@@ -27,6 +28,17 @@ from research_agent.chat.domain import (
     ModelKnowledgeBlock,
     QueryPlan,
     VerifiedAnswer,
+)
+from research_agent.chat.preparation import (
+    bounded_constraints,
+    critical_lines,
+    project_text,
+)
+from research_agent.providers.context_budget import (
+    BudgetedLLMProvider,
+    ContextBudgetPolicy,
+    prefix,
+    units,
 )
 from research_agent.providers.protocols import ChatTurn, LLMProvider
 from research_agent.retrieval.domain import (
@@ -98,6 +110,13 @@ def compile_chat_graph(
     *,
     checkpointer: BaseCheckpointSaver[str] | None = None,
 ) -> CompiledStateGraph:
+    llm = (
+        dependencies.llm
+        if isinstance(dependencies.llm, BudgetedLLMProvider)
+        else BudgetedLLMProvider(dependencies.llm, ContextBudgetPolicy())
+    )
+    policy = llm.policy
+
     async def load_context(state: ChatGraphState) -> dict[str, object]:
         reader = getattr(dependencies.chats, "get_context_snapshot", None)
         cached = await reader(state["run_id"]) if reader else None
@@ -127,13 +146,52 @@ def compile_chat_graph(
                 history_message_count=state.get("history_message_count", 0),
             )
         turns = context_prompt_turns(context)
+        warnings = list(context.warnings)
+        question, notices = await project_text(
+            llm,
+            policy,
+            state["question"],
+            limit=policy.question,
+            label="Current question",
+        )
+        warnings.extend(notices)
+        critical = []
         research_context = state.get("research_context")
         if research_context is not None:
+            critical.extend(
+                critical_lines(
+                    str(research_context.get("resource_constraints", "")),
+                    "space constraints",
+                )
+            )
+            research_text, notices = await project_text(
+                llm,
+                policy,
+                json.dumps(research_context, ensure_ascii=False),
+                limit=policy.research - 256,
+                label="Research space settings",
+            )
+            warnings.extend(notices)
             turns.append(
                 ChatTurn(
                     role="user",
                     content="当前研究空间设置，由用户填写；这是研究目标和约束，不是论文证据，也不代表实验已经完成。以此轮设置为准：\n"
-                    + json.dumps(research_context, ensure_ascii=False),
+                    + research_text,
+                    category="research",
+                )
+            )
+        critical.extend(context.critical_constraints)
+        critical.extend(critical_lines(state["question"], "current question"))
+        constraints = bounded_constraints(critical, policy.constraints - 192)
+        if units("\n".join(critical)) > policy.constraints - 192:
+            warnings.append("CONTEXT_CONSTRAINTS_PARTIAL")
+        if constraints:
+            turns.append(
+                ChatTurn(
+                    "user",
+                    "用户原文约束（按时间顺序；冲突时采用最新更正；不是论文证据）：\n"
+                    + "\n".join(constraints),
+                    "constraints",
                 )
             )
         await dependencies.chats.record_event(
@@ -143,10 +201,20 @@ def compile_chat_graph(
                 "recent_message_count": len(context.messages),
                 "memory_present": bool(context.memory_summary),
                 "memory_compacted": context.compacted,
+                "history_messages_read": context.history_messages_read,
+                "history_max_sequence": (memory_snapshot or {}).get(
+                    "history_max_sequence", 0
+                ),
+                "warning_count": len(warnings),
             },
         )
         assembled: dict[str, object] = {
-            "context": [{"role": turn.role, "content": turn.content} for turn in turns],
+            "context": [
+                {"role": turn.role, "content": turn.content, "category": turn.category}
+                for turn in turns
+            ],
+            "question_projection": question,
+            "warnings": list(dict.fromkeys(warnings)),
             "memory_summary": context.memory_summary,
             "memory_compacted": context.compacted,
         }
@@ -156,7 +224,7 @@ def compile_chat_graph(
         return assembled
 
     async def plan_query(state: ChatGraphState) -> dict[str, object]:
-        plan = await dependencies.llm.generate_structured(
+        plan = await llm.generate_structured(
             operation="plan_query",
             messages=[
                 ChatTurn(
@@ -171,7 +239,11 @@ def compile_chat_graph(
                     ),
                 ),
                 *_context_turns(state),
-                ChatTurn(role="user", content=state["question"]),
+                ChatTurn(
+                    role="user",
+                    content=state.get("question_projection", state["question"]),
+                    category="question",
+                ),
             ],
             output_type=QueryPlan,
         )
@@ -187,6 +259,20 @@ def compile_chat_graph(
         return {"plan": plan}
 
     async def retrieve(state: ChatGraphState) -> dict[str, object]:
+        snapshot_reader = getattr(dependencies.chats, "get_prompt_snapshot", None)
+        cached_evidence = (
+            await snapshot_reader(state["run_id"], "retrieved_evidence")
+            if snapshot_reader
+            else None
+        )
+        if cached_evidence is not None:
+            return {
+                "evidence": TypeAdapter(list[RetrievalCandidate]).validate_python(
+                    cached_evidence["items"]
+                ),
+                "warnings": list(state.get("warnings", []))
+                + list(cached_evidence.get("warnings", [])),
+            }
         plan = state.get("plan")
         if plan is None:
             raise ValueError("query plan is missing")
@@ -215,7 +301,25 @@ def compile_chat_graph(
             event_type="rerank_completed",
             payload={"candidate_count": len(evidence)},
         )
-        return {"evidence": evidence}
+        bounded = _bounded_evidence(evidence, policy.evidence)
+        warnings = list(state.get("warnings", []))
+        if bounded != evidence:
+            warnings.append("CONTEXT_EVIDENCE_SHORTENED")
+        snapshot_writer = getattr(dependencies.chats, "save_prompt_snapshot", None)
+        if snapshot_writer:
+            await snapshot_writer(
+                state["run_id"],
+                "retrieved_evidence",
+                {
+                    "items": TypeAdapter(list[RetrievalCandidate]).dump_python(
+                        bounded, mode="json"
+                    ),
+                    "warnings": ["CONTEXT_EVIDENCE_SHORTENED"]
+                    if bounded != evidence
+                    else [],
+                },
+            )
+        return {"evidence": bounded, "warnings": warnings}
 
     async def check_evidence(state: ChatGraphState) -> dict[str, object]:
         evidence = state.get("evidence", [])
@@ -241,7 +345,7 @@ def compile_chat_graph(
             event_type="answer_generation_started",
             payload={"source": "paper_evidence"},
         )
-        draft = await dependencies.llm.generate_structured(
+        draft = await llm.generate_structured(
             operation="generate_draft",
             messages=[
                 ChatTurn(
@@ -256,8 +360,10 @@ def compile_chat_graph(
                 *_context_turns(state),
                 ChatTurn(
                     role="user",
-                    content=f"Question: {state['question']}\n\nEvidence:\n{evidence_text}",
+                    content=state.get("question_projection", state["question"]),
+                    category="question",
                 ),
+                ChatTurn("user", evidence_text, "evidence"),
             ],
             output_type=AnswerDraft,
         )
@@ -277,7 +383,7 @@ def compile_chat_graph(
             event_type="answer_generation_started",
             payload={"source": "model_knowledge"},
         )
-        answer = await dependencies.llm.generate_structured(
+        answer = await llm.generate_structured(
             operation="generate_general_answer",
             messages=[
                 ChatTurn(
@@ -290,7 +396,11 @@ def compile_chat_graph(
                     ),
                 ),
                 *_context_turns(state),
-                ChatTurn(role="user", content=state["question"]),
+                ChatTurn(
+                    role="user",
+                    content=state.get("question_projection", state["question"]),
+                    category="question",
+                ),
             ],
             output_type=GeneralAnswer,
         )
@@ -326,7 +436,7 @@ def compile_chat_graph(
                     )
                 ]
             ),
-            "warnings": [warning],
+            "warnings": [*state.get("warnings", []), warning],
         }
 
     async def verify_citations(state: ChatGraphState) -> dict[str, object]:
@@ -339,7 +449,7 @@ def compile_chat_graph(
         repaired = False
         if verification.failed_block_indexes:
             repaired = True
-            repaired_draft = await dependencies.llm.generate_structured(
+            repaired_draft = await llm.generate_structured(
                 operation="repair_citations",
                 messages=[
                     ChatTurn(
@@ -353,11 +463,15 @@ def compile_chat_graph(
                     ),
                     ChatTurn(
                         role="user",
-                        content=(
-                            f"Draft:\n{draft.model_dump_json()}\n\n"
-                            f"Evidence:\n{_evidence_text(evidence)}"
-                        ),
+                        content=(f"Draft:\n{draft.model_dump_json()}"),
+                        category="recent",
                     ),
+                    ChatTurn(
+                        "user",
+                        state.get("question_projection", state["question"]),
+                        "question",
+                    ),
+                    ChatTurn("user", _evidence_text(evidence), "evidence"),
                 ],
                 output_type=AnswerDraft,
             )
@@ -372,6 +486,7 @@ def compile_chat_graph(
             else:
                 warnings.append("CITATIONS_REPAIRED")
 
+        warnings.extend(sorted(llm.warnings))
         verified = VerifiedAnswer(
             blocks=verification.answer.blocks,
             warnings=_unique(warnings),
@@ -473,5 +588,31 @@ def _context_turns(state: ChatGraphState) -> list[ChatTurn]:
         role = item.get("role")
         content = item.get("content")
         if role in {"system", "user", "assistant"} and isinstance(content, str):
-            turns.append(ChatTurn(role=role, content=content))
+            turns.append(
+                ChatTurn(
+                    role=role, content=content, category=item.get("category", "recent")
+                )
+            )
     return turns
+
+
+def _bounded_evidence(
+    evidence: list[RetrievalCandidate], budget: int
+) -> list[RetrievalCandidate]:
+    selected: list[RetrievalCandidate] = []
+    remaining = budget
+    for index, item in enumerate(evidence):
+        header = units(_evidence_text([replace(item, content="")])) + (
+            2 if selected else 0
+        )
+        if remaining <= header:
+            break
+        # Only raw prefixes are supplied to both generator and verifier. Never
+        # insert a generated summary or truncation marker into citable evidence.
+        content = prefix(
+            item.content, max(0, remaining // (len(evidence) - index) - header)
+        )
+        if content:
+            selected.append(replace(item, content=content))
+            remaining -= header + units(content)
+    return selected

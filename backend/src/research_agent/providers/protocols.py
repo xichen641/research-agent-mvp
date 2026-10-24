@@ -3,7 +3,6 @@ from typing import Protocol, TypeVar
 
 from pydantic import BaseModel
 
-
 OutputT = TypeVar("OutputT", bound=BaseModel)
 
 
@@ -11,6 +10,7 @@ OutputT = TypeVar("OutputT", bound=BaseModel)
 class ChatTurn:
     role: str
     content: str
+    category: str = "recent"
 
 
 @dataclass(frozen=True, slots=True)
