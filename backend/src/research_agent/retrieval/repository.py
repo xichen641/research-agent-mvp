@@ -246,10 +246,10 @@ class SqlEmbeddingRepository:
             version.status = VersionStatus.READY
             document.status = DocumentStatus.READY
             document.current_version_id = version_id
-            task.stage = TaskStage.EMBEDDING
+            task.stage = TaskStage.VERIFYING
             task.status = TaskStatus.READY
-            task.progress_current = list(TaskStage).index(TaskStage.EMBEDDING) + 1
             task.progress_total = len(TaskStage)
+            task.progress_current = task.progress_total
             task.error_code = None
             task.error_message = None
         except (IncompleteEmbeddingsError, EmbeddingSpaceConflictError):

@@ -3,9 +3,9 @@ from io import BytesIO
 from pathlib import Path
 from typing import BinaryIO
 
+import pytest
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-import pytest
 from sqlalchemy import func, inspect, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,7 +23,10 @@ from research_agent.retrieval.models import (
     ChunkEmbeddingModel,
     EmbeddingSpaceModel,
 )
-from research_agent.retrieval.repository import SqlEmbeddingRepository
+from research_agent.retrieval.repository import (
+    IncompleteEmbeddingsError,
+    SqlEmbeddingRepository,
+)
 from research_agent.shared.errors import AppError
 from research_agent.tasks.domain import TaskStage, TaskStatus
 from research_agent.tasks.repository import SqlTaskRepository
@@ -132,7 +135,10 @@ def test_embedding_migration_is_single_head() -> None:
     config = Config(str(Path(__file__).parents[3] / "alembic.ini"))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["0009_durable_chat_runs"]
+    assert len(script.get_heads()) == 1
+    assert "0004_embeddings" in {
+        revision.revision for revision in script.walk_revisions()
+    }
 
 
 @pytest.mark.integration
@@ -187,6 +193,7 @@ async def test_embedding_stage_is_idempotent_excludes_references_and_activates_r
 
     await pipeline.embed_and_activate(created.version_id)
     await pipeline.embed_and_activate(created.version_id)
+    await pipeline.run(created.version_id)
 
     assert provider.batches == [["first body chunk"], ["second body chunk"]]
     assert (
@@ -205,7 +212,8 @@ async def test_embedding_stage_is_idempotent_excludes_references_and_activates_r
     assert document.current_version_id == created.version_id
     assert version is not None and version.status == VersionStatus.READY
     assert task is not None and task.status == TaskStatus.READY
-    assert task.stage == TaskStage.EMBEDDING
+    assert task.stage == TaskStage.VERIFYING
+    assert task.progress_current == task.progress_total == len(TaskStage)
     assert task.error_code is None and task.error_message is None
     assert space is not None and space.active is True
 
@@ -242,6 +250,9 @@ async def test_embedding_stage_restarts_from_first_missing_batch_after_provider_
     failed_task = await db_session.get(DocumentTaskModel, created.task_id)
     assert failed_task is not None and failed_task.status == TaskStatus.FAILED
     assert failed_task.error_code == "EMBEDDING_PROVIDER_FAILED"
+    assert failed_task.stage == TaskStage.EMBEDDING
+    assert failed_task.progress_current == 5
+    assert failed_task.progress_total == len(TaskStage)
 
     await pipeline.embed_and_activate(created.version_id)
 
@@ -256,3 +267,35 @@ async def test_embedding_stage_restarts_from_first_missing_batch_after_provider_
     )
     recovered_task = await db_session.get(DocumentTaskModel, created.task_id)
     assert recovered_task is not None and recovered_task.status == TaskStatus.READY
+    assert recovered_task.stage == TaskStage.VERIFYING
+    assert recovered_task.progress_current == recovered_task.progress_total == len(
+        TaskStage
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_incomplete_embeddings_do_not_mark_task_complete(
+    db_session: AsyncSession,
+) -> None:
+    _, _, created = await seed_embedding_stage(db_session)
+    embeddings = SqlEmbeddingRepository(db_session)
+    space = await embeddings.get_or_create_space(
+        model_id="incomplete-test", dimension=1536, pipeline_version="pipeline-v1"
+    )
+    await embeddings.commit()
+
+    with pytest.raises(IncompleteEmbeddingsError):
+        await embeddings.activate_if_complete(
+            version_id=created.version_id,
+            task_id=created.task_id,
+            pipeline_version="pipeline-v1",
+            embedding_space_id=space.id,
+        )
+
+    task = await db_session.get(DocumentTaskModel, created.task_id)
+    version = await db_session.get(DocumentVersionModel, created.version_id)
+    assert task is not None and task.status == TaskStatus.RUNNING
+    assert task.stage == TaskStage.EMBEDDING
+    assert task.progress_current == 5 < task.progress_total
+    assert version is not None and version.status != VersionStatus.READY
