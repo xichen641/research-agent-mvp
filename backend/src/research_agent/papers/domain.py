@@ -44,6 +44,10 @@ class PaperPersistenceError(Exception):
         super().__init__("paper persistence failed")
 
 
+class DocumentDeletionConflictError(Exception):
+    pass
+
+
 @dataclass(frozen=True, slots=True)
 class CreatedDocument:
     document_id: EntityId

@@ -1,12 +1,17 @@
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from datetime import UTC, datetime
-
-from sqlalchemy import select
+from sqlalchemy import Select, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from research_agent.papers.models import DocumentTaskModel, OutboxEventModel
+from research_agent.papers.domain import DocumentStatus
+from research_agent.papers.models import (
+    DocumentModel,
+    DocumentTaskModel,
+    DocumentVersionModel,
+    OutboxEventModel,
+)
 from research_agent.shared.ids import EntityId, new_id
 from research_agent.tasks.domain import TaskRecord, TaskStage, TaskStatus
 
@@ -57,7 +62,11 @@ class SqlTaskRepository:
 
     async def get_task(self, task_id: EntityId) -> TaskRecord | None:
         try:
-            model = await self._session.get(DocumentTaskModel, task_id)
+            model = (
+                await self._session.execute(
+                    _active_task_query().where(DocumentTaskModel.id == task_id)
+                )
+            ).scalar_one_or_none()
         except SQLAlchemyError as error:
             raise TaskPersistenceError() from error
         if model is None:
@@ -67,7 +76,7 @@ class SqlTaskRepository:
     async def get_task_for_version(self, version_id: EntityId) -> TaskRecord | None:
         try:
             statement = (
-                select(DocumentTaskModel)
+                _active_task_query()
                 .where(DocumentTaskModel.document_version_id == version_id)
                 .order_by(
                     DocumentTaskModel.created_at.desc(), DocumentTaskModel.id.desc()
@@ -91,7 +100,7 @@ class SqlTaskRepository:
         error_message: str | None = None,
     ) -> None:
         try:
-            model = await self._session.get(DocumentTaskModel, task_id)
+            model = await self._lock_active_task(task_id)
             if model is None:
                 raise TaskRecordNotFoundError("task does not exist")
             model.stage = stage
@@ -113,12 +122,7 @@ class SqlTaskRepository:
         self, task_id: EntityId, *, retryable_error_codes: frozenset[str]
     ) -> TaskRecord | None:
         try:
-            statement = (
-                select(DocumentTaskModel)
-                .where(DocumentTaskModel.id == task_id)
-                .with_for_update()
-            )
-            model = (await self._session.scalars(statement)).one_or_none()
+            model = await self._lock_active_task(task_id)
             if model is None:
                 return None
             if (
@@ -154,6 +158,49 @@ class SqlTaskRepository:
             await self._session.rollback()
         except SQLAlchemyError as error:
             raise TaskPersistenceError() from error
+
+    async def _lock_active_task(self, task_id: EntityId) -> DocumentTaskModel | None:
+        # Match deletion's document -> task lock order so a stale worker or retry
+        # cannot overwrite a tombstone after waiting for its transaction.
+        document = (
+            await self._session.execute(
+                select(DocumentModel)
+                .join(
+                    DocumentVersionModel,
+                    DocumentVersionModel.document_id == DocumentModel.id,
+                )
+                .join(
+                    DocumentTaskModel,
+                    DocumentTaskModel.document_version_id == DocumentVersionModel.id,
+                )
+                .where(DocumentTaskModel.id == task_id)
+                .with_for_update(of=DocumentModel)
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if document is None or document.status == DocumentStatus.DELETED:
+            return None
+        return (
+            await self._session.execute(
+                select(DocumentTaskModel)
+                .where(DocumentTaskModel.id == task_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+
+
+def _active_task_query() -> Select[tuple[DocumentTaskModel]]:
+    return (
+        select(DocumentTaskModel)
+        .join(
+            DocumentVersionModel,
+            DocumentVersionModel.id == DocumentTaskModel.document_version_id,
+        )
+        .join(DocumentModel, DocumentModel.id == DocumentVersionModel.document_id)
+        .where(DocumentModel.status != DocumentStatus.DELETED)
+        .execution_options(populate_existing=True)
+    )
 
 
 def _task_record(model: DocumentTaskModel) -> TaskRecord:

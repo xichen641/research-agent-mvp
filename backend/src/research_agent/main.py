@@ -120,7 +120,7 @@ def create_app(
         CORSMiddleware,
         allow_origins=allowed_origins,
         allow_credentials=False,
-        allow_methods=["GET", "POST", "PUT", "OPTIONS"],
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         allow_headers=["Content-Type", "X-Trace-ID", "Last-Event-ID"],
     )
 
@@ -144,6 +144,7 @@ def create_app(
             "INVALID_PDF": 400,
             "INVALID_CURSOR": 400,
             "DOCUMENT_NOT_FOUND": 404,
+            "DOCUMENT_DELETE_CONFLICT": 409,
             "TASK_NOT_FOUND": 404,
             "TASK_NOT_RETRYABLE": 409,
             "CHAT_RUN_NOT_FOUND": 404,

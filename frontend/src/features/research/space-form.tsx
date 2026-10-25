@@ -31,7 +31,8 @@ export function SpaceForm({
     resource_constraints: space?.resource_constraints ?? "",
     current_question: space?.current_question ?? "",
     material_version_ids:
-      space?.materials.map((item) => item.document_version_id) ?? [],
+      space?.materials.filter((item) => item.status !== "DELETED")
+        .map((item) => item.document_version_id) ?? [],
   }));
   const [papers, setPapers] = useState<PaperSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -155,7 +156,7 @@ export function SpaceForm({
                   <input
                     type="checkbox"
                     checked={form.material_version_ids.includes(item.id)}
-                    disabled={otherSelected}
+                    disabled={otherSelected || item.status === "DELETED"}
                     onChange={(event) =>
                       setForm({
                         ...form,

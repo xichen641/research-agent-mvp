@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { createChatSession } from "@/features/chat/api";
 import { ArxivSearch } from "@/features/discovery/arxiv-search";
@@ -11,6 +11,7 @@ import {
   documentPdfUrl,
   listDocuments,
 } from "@/features/papers/api";
+import { DeletePaperDialog } from "@/features/papers/delete-paper-dialog";
 import { TaskProgress } from "@/features/papers/task-progress";
 import type {
   PaperSummary,
@@ -46,26 +47,32 @@ export default function PapersPage() {
   const [startingChat, setStartingChat] = useState<ChatLaunch | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [deletingPaper, setDeletingPaper] = useState<PaperSummary | null>(null);
+  const [deletionNotice, setDeletionNotice] = useState<string | null>(null);
+  const deletedIds = useRef(new Set<string>());
+  const listHeading = useRef<HTMLHeadingElement>(null);
 
   const replacePapers = useCallback(async (signal?: AbortSignal) => {
     const response = await listDocuments(undefined, signal);
-    setPapers(response.items);
+    const items = response.items.filter((paper) => !deletedIds.current.has(paper.id));
+    setPapers(items);
     setNextCursor(response.nextCursor);
     setSelectedId((current) => (
-      current && response.items.some((paper) => paper.id === current)
+      current && items.some((paper) => paper.id === current)
         ? current
-        : response.items[0]?.id ?? null
+        : items[0]?.id ?? null
     ));
-    return response.items;
+    return items;
   }, []);
 
   useEffect(() => {
     const controller = new AbortController();
     void listDocuments(undefined, controller.signal)
       .then((response) => {
-        setPapers(response.items);
+        const items = response.items.filter((paper) => !deletedIds.current.has(paper.id));
+        setPapers(items);
         setNextCursor(response.nextCursor);
-        setSelectedId(response.items[0]?.id ?? null);
+        setSelectedId(items[0]?.id ?? null);
         setError(null);
       })
       .catch((caught) => {
@@ -115,6 +122,7 @@ export default function PapersPage() {
   });
 
   const recordTaskState = useCallback((documentId: string, task: TaskState) => {
+    if (deletedIds.current.has(documentId)) return;
     setTaskStates((current) => {
       if (current.get(documentId) === task) return current;
       const next = new Map(current);
@@ -124,10 +132,10 @@ export default function PapersPage() {
   }, []);
 
   async function receiveUpload(receipt: UploadReceipt) {
-    setSelectedId(receipt.documentId);
+    if (!deletedIds.current.has(receipt.documentId)) setSelectedId(receipt.documentId);
     try {
       await replacePapers();
-      setSelectedId(receipt.documentId);
+      if (!deletedIds.current.has(receipt.documentId)) setSelectedId(receipt.documentId);
       setError(null);
     } catch (caught) {
       setError(caught instanceof ApiProblem ? caught.message : "上传已受理，但列表刷新失败");
@@ -148,7 +156,8 @@ export default function PapersPage() {
     setLoadingMore(true);
     try {
       const response = await listDocuments(nextCursor);
-      setPapers((current) => deduplicatePapers([...current, ...response.items]));
+      setPapers((current) => deduplicatePapers([...current, ...response.items])
+        .filter((paper) => !deletedIds.current.has(paper.id)));
       setNextCursor(response.nextCursor);
     } catch (caught) {
       setError(caught instanceof ApiProblem ? caught.message : "更多论文暂时无法加载");
@@ -168,6 +177,24 @@ export default function PapersPage() {
       return;
     }
     setChatScopeIds((current) => [...current, documentId]);
+  }
+
+  function receiveDeletion(documentId: string) {
+    deletedIds.current.add(documentId);
+    setPapers((current) => current.filter((paper) => paper.id !== documentId));
+    setTaskStates((current) => {
+      const next = new Map(current);
+      next.delete(documentId);
+      return next;
+    });
+    setChatScopeIds((current) => current.filter((id) => id !== documentId));
+    setSelectedId((current) => current === documentId
+      ? papers.find((paper) => !deletedIds.current.has(paper.id))?.id ?? null
+      : current);
+    setDeletionNotice(`已删除「${deletingPaper?.title ?? "论文"}」`);
+    setDeletingPaper(null);
+    setActionError(null);
+    requestAnimationFrame(() => listHeading.current?.focus());
   }
 
   async function startChat(
@@ -273,7 +300,7 @@ export default function PapersPage() {
             <div className="border-b border-slate-200 p-4 sm:p-5">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
-                  <h2 id="paper-list-title" className="text-lg font-semibold text-slate-950">论文库</h2>
+                  <h2 ref={listHeading} id="paper-list-title" tabIndex={-1} className="text-lg font-semibold text-slate-950">论文库</h2>
                   <p className="mt-1 text-xs text-slate-500">当前显示 {visiblePapers.length} 篇</p>
                 </div>
                 <label className="relative block min-w-[220px] flex-1 sm:max-w-sm">
@@ -310,6 +337,7 @@ export default function PapersPage() {
 
             {loading && <p className="p-8 text-center text-sm text-slate-500" role="status">正在加载论文库…</p>}
             {error && <p className="m-5 rounded-xl bg-red-50 p-4 text-sm text-red-800" role="alert">{error}</p>}
+            {deletionNotice && <p className="m-5 rounded-xl bg-emerald-50 p-3 text-sm text-emerald-800" role="status">{deletionNotice}</p>}
             {!loading && !error && visiblePapers.length === 0 && (
               <div className="p-10 text-center">
                 <p className="font-medium text-slate-700">没有匹配的论文</p>
@@ -359,6 +387,21 @@ export default function PapersPage() {
                       />
                       {isReady(paper, task) ? "加入跨论文问答范围" : "达到 READY 后可加入问答范围"}
                     </label>
+                    <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
+                      {!canDelete(paper, task) && <p className="text-xs text-slate-500">任务结束后可删除</p>}
+                      <button
+                        type="button"
+                        aria-label={`删除 ${paper.title}`}
+                        disabled={!canDelete(paper, task) || startingChat !== null}
+                        onClick={() => {
+                          setDeletionNotice(null);
+                          setDeletingPaper(paper);
+                        }}
+                        className="rounded-lg border border-red-200 px-3 py-1.5 text-xs font-semibold text-red-700 hover:border-red-400 hover:bg-red-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400 disabled:hover:bg-transparent"
+                      >
+                        删除论文
+                      </button>
+                    </div>
                   </article>
                 );
               })}
@@ -390,6 +433,15 @@ export default function PapersPage() {
           />
         </div>
       </div>
+
+      {deletingPaper && (
+        <DeletePaperDialog
+          key={deletingPaper.id}
+          paper={deletingPaper}
+          onDeleted={receiveDeletion}
+          onCancel={() => setDeletingPaper(null)}
+        />
+      )}
 
       {uploadOpen && (
         <div className="fixed inset-0 z-50 flex justify-end bg-slate-950/35 backdrop-blur-[2px]">
@@ -535,6 +587,10 @@ function effectiveStatus(paper: PaperSummary, task?: TaskState): string {
 
 function isReady(paper: PaperSummary, task?: TaskState): boolean {
   return effectiveStatus(paper, task) === "READY";
+}
+
+function canDelete(paper: PaperSummary, task?: TaskState): boolean {
+  return ["READY", "FAILED", "CANCELLED", "NEEDS_REVIEW"].includes(effectiveStatus(paper, task));
 }
 
 function StatusBadge({ status, dark = false }: { status: string; dark?: boolean }) {

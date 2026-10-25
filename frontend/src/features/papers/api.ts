@@ -86,6 +86,13 @@ export async function getTask(
   );
 }
 
+export async function deleteDocument(documentId: string): Promise<void> {
+  await apiRequest<{ id: string; status: "DELETED" }>(
+    `/api/v1/documents/${encodeURIComponent(documentId)}`,
+    { method: "DELETE" },
+  );
+}
+
 export async function retryTask(
   taskId: string,
   signal?: AbortSignal,

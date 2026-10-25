@@ -1,11 +1,23 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ApiProblem } from "@/lib/api";
-import { getTask, listDocuments } from "./api";
+import { deleteDocument, getTask, listDocuments } from "./api";
 
 afterEach(() => vi.unstubAllGlobals());
 
 describe("paper API", () => {
+  it("deletes only the requested document and accepts the terminal receipt", async () => {
+    const fetch = vi.fn().mockResolvedValue(Response.json({ id: "paper-1", status: "DELETED" }));
+    vi.stubGlobal("fetch", fetch);
+
+    await expect(deleteDocument("paper-1")).resolves.toBeUndefined();
+
+    expect(fetch).toHaveBeenCalledWith(
+      "http://127.0.0.1:8000/api/v1/documents/paper-1",
+      { method: "DELETE" },
+    );
+  });
+
   it("maps snake_case document payloads to camelCase", async () => {
     vi.stubGlobal(
       "fetch",

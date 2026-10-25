@@ -9,8 +9,11 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, File, Query, UploadFile
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, ValidationError
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from research_agent.config import get_settings
 from research_agent.papers.domain import (
+    DocumentDeletionConflictError,
     DocumentDetailRecord,
     DocumentSummaryRecord,
     PaperPersistenceError,
@@ -23,7 +26,6 @@ from research_agent.papers.storage import MinioObjectStorage, ObjectStorage
 from research_agent.shared.db import async_session_factory
 from research_agent.shared.errors import AppError
 from research_agent.shared.ids import EntityId
-from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter()
 
@@ -60,6 +62,11 @@ class DocumentDetailResponse(DocumentSummaryResponse):
 class DocumentListResponse(BaseModel):
     items: list[DocumentSummaryResponse]
     next_cursor: str | None
+
+
+class DeleteDocumentResponse(BaseModel):
+    id: EntityId
+    status: Literal["DELETED"] = "DELETED"
 
 
 async def get_db_session() -> AsyncIterator[AsyncSession]:
@@ -125,6 +132,32 @@ async def list_documents(
         items=[_summary_response(record) for record in items],
         next_cursor=next_cursor,
     )
+
+
+@router.delete("/documents/{document_id}", response_model=DeleteDocumentResponse)
+async def delete_document(
+    document_id: EntityId,
+    repository: Annotated[SqlPaperRepository, Depends(get_paper_repository)],
+) -> DeleteDocumentResponse:
+    try:
+        found = await repository.delete_document(document_id)
+        if not found:
+            raise AppError(code="DOCUMENT_NOT_FOUND", message="Document was not found")
+        await repository.commit()
+    except DocumentDeletionConflictError:
+        await repository.rollback()
+        raise AppError(
+            code="DOCUMENT_DELETE_CONFLICT",
+            message="论文仍在处理中，请等待任务结束后再删除",
+        ) from None
+    except PaperPersistenceError:
+        await repository.rollback()
+        raise AppError(
+            code="PAPER_PERSISTENCE_ERROR",
+            message="论文删除失败，请稍后重试",
+            retryable=True,
+        ) from None
+    return DeleteDocumentResponse(id=document_id)
 
 
 @router.get("/documents/{document_id}", response_model=DocumentDetailResponse)

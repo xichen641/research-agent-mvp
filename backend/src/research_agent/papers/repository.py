@@ -6,12 +6,16 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from research_agent.discovery.models import ExternalPaperSourceModel
+from research_agent.ingestion.chunker import lexical_text
+from research_agent.ingestion.models import ChunkDraft, DocumentChunkModel
 from research_agent.papers.domain import (
     CreatedDocument,
+    DocumentDeletionConflictError,
     DocumentDetailRecord,
     DocumentRecord,
-    DocumentSummaryRecord,
     DocumentStatus,
+    DocumentSummaryRecord,
     DocumentVersionRecord,
     DuplicateDocumentError,
     PaperPersistenceError,
@@ -25,8 +29,6 @@ from research_agent.papers.models import (
     DocumentVersionModel,
     OutboxEventModel,
 )
-from research_agent.ingestion.chunker import lexical_text
-from research_agent.ingestion.models import ChunkDraft, DocumentChunkModel
 from research_agent.shared.ids import EntityId, new_id
 from research_agent.tasks.domain import TaskRecord, TaskStage, TaskStatus
 
@@ -270,7 +272,56 @@ class SqlPaperRepository:
 
     async def get_document(self, document_id: EntityId) -> DocumentRecord | None:
         return await self._get_document_record(
-            self._document_query().where(DocumentModel.id == document_id)
+            self._document_query().where(
+                DocumentModel.id == document_id,
+                DocumentModel.status != DocumentStatus.DELETED,
+            )
+        )
+
+    async def delete_document(self, document_id: EntityId) -> bool:
+        """Remove a terminal paper from active use, retaining historical evidence."""
+        try:
+            document = await self._lock_document(document_id)
+            if document is None:
+                return False
+            if document.status == DocumentStatus.DELETED:
+                return True
+            # All ingestion/retry writes take the parent lock first, so a retry
+            # cannot start between this check and the deletion commit.
+            tasks = (
+                await self._session.scalars(
+                    select(DocumentTaskModel)
+                    .join(DocumentVersionModel)
+                    .where(DocumentVersionModel.document_id == document_id)
+                    .with_for_update(of=DocumentTaskModel)
+                    .execution_options(populate_existing=True)
+                )
+            ).all()
+            if document.status in {
+                DocumentStatus.PROCESSING, DocumentStatus.DELETING
+            } or any(
+                task.status in {TaskStatus.QUEUED, TaskStatus.RUNNING}
+                for task in tasks
+            ):
+                raise DocumentDeletionConflictError()
+            document.status = DocumentStatus.DELETED
+            # Let a later arXiv import create a fresh document instead of
+            # returning a receipt for this deleted one.
+            await self._session.execute(
+                delete(ExternalPaperSourceModel).where(
+                    ExternalPaperSourceModel.document_id == document_id
+                )
+            )
+            return True
+        except SQLAlchemyError as error:
+            raise PaperPersistenceError() from error
+
+    async def _lock_document(self, document_id: EntityId) -> DocumentModel | None:
+        return await self._session.scalar(
+            select(DocumentModel)
+            .where(DocumentModel.id == document_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
 
     async def find_by_sha256(self, sha256: str) -> DocumentRecord | None:
@@ -380,9 +431,9 @@ class SqlPaperRepository:
         version_id: EntityId,
         status: DocumentStatus,
     ) -> None:
-        document = await self._session.get(DocumentModel, document_id)
+        document = await self._lock_document(document_id)
         version = await self._session.get(DocumentVersionModel, version_id)
-        if document is None:
+        if document is None or document.status == DocumentStatus.DELETED:
             raise PaperRecordNotFoundError(f"document {document_id} does not exist")
         if version is None or version.document_id != document_id:
             raise PaperRecordNotFoundError(
@@ -408,8 +459,8 @@ class SqlPaperRepository:
             version = await self._session.get(DocumentVersionModel, version_id)
             if version is None:
                 raise PaperRecordNotFoundError("document version does not exist")
-            document = await self._session.get(DocumentModel, version.document_id)
-            if document is None:
+            document = await self._lock_document(version.document_id)
+            if document is None or document.status == DocumentStatus.DELETED:
                 raise PaperRecordNotFoundError("document does not exist")
             # The manifest and both statuses share one transaction boundary.
             # 清单和两个状态共享同一个事务边界。
@@ -431,8 +482,8 @@ class SqlPaperRepository:
             version = await self._session.get(DocumentVersionModel, version_id)
             if version is None:
                 raise PaperRecordNotFoundError("document version does not exist")
-            document = await self._session.get(DocumentModel, version.document_id)
-            if document is None:
+            document = await self._lock_document(version.document_id)
+            if document is None or document.status == DocumentStatus.DELETED:
                 raise PaperRecordNotFoundError("document does not exist")
             version.status = VersionStatus.FAILED
             document.status = DocumentStatus.FAILED

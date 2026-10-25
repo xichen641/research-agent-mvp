@@ -121,3 +121,33 @@ it("keeps the original edit revision when background polling receives another up
     resource_constraints: "12GB",
   });
 });
+
+it("shows deleted materials without selecting them again when saving", async () => {
+  const saved = vi.fn();
+  const fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) =>
+    init?.method === "PUT"
+      ? Response.json({ id: "space-1" })
+      : Response.json({ items: [], next_cursor: null }),
+  );
+  vi.stubGlobal("fetch", fetch);
+  render(<SpaceForm space={{
+    id: "space-1", name: "ReID", goal: "", resource_constraints: "",
+    task_settings: "", current_question: "", revision: 2, created_at: "", updated_at: "",
+    materials: [
+      { document_id: "deleted", document_version_id: "deleted-version", title: "已移除论文", filename: "deleted.pdf", status: "DELETED", is_current_version: true },
+      { document_id: "ready", document_version_id: "ready-version", title: "保留论文", filename: "ready.pdf", status: "READY", is_current_version: true },
+    ],
+  }} onSaved={saved} />);
+
+  const deleted = await screen.findByRole("checkbox", { name: /已移除论文/ });
+  expect(deleted).toBeDisabled();
+  expect(deleted).not.toBeChecked();
+  expect(screen.getByRole("checkbox", { name: /保留论文/ })).toBeChecked();
+  fireEvent.click(screen.getByRole("button", { name: "保存修订" }));
+  await waitFor(() => expect(saved).toHaveBeenCalledWith({ id: "space-1" }));
+  const put = fetch.mock.calls.find(([, init]) => init?.method === "PUT");
+  expect(JSON.parse(String(put?.[1]?.body))).toMatchObject({
+    expected_revision: 2,
+    material_version_ids: ["ready-version"],
+  });
+});

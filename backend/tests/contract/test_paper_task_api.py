@@ -426,6 +426,7 @@ async def test_cors_allows_only_configured_web_origin(
         "GET",
         "POST",
         "PUT",
+        "DELETE",
         "OPTIONS",
     }
     assert denied.status_code == 400

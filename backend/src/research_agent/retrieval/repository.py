@@ -174,17 +174,25 @@ class SqlEmbeddingRepository:
         embedding_space_id: EntityId,
     ) -> None:
         try:
+            document_id = await self._session.scalar(
+                select(DocumentVersionModel.document_id)
+                .where(DocumentVersionModel.id == version_id)
+            )
+            if document_id is None:
+                raise IncompleteEmbeddingsError("document version does not exist")
+            document = await self._session.scalar(
+                select(DocumentModel)
+                .where(DocumentModel.id == document_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if document is None or document.status == DocumentStatus.DELETED:
+                raise IncompleteEmbeddingsError("document is no longer active")
             version = await self._session.scalar(
                 select(DocumentVersionModel)
                 .where(DocumentVersionModel.id == version_id)
                 .with_for_update()
-            )
-            if version is None:
-                raise IncompleteEmbeddingsError("document version does not exist")
-            document = await self._session.scalar(
-                select(DocumentModel)
-                .where(DocumentModel.id == version.document_id)
-                .with_for_update()
+                .execution_options(populate_existing=True)
             )
             task = await self._session.scalar(
                 select(DocumentTaskModel)
@@ -196,7 +204,7 @@ class SqlEmbeddingRepository:
                 .where(EmbeddingSpaceModel.id == embedding_space_id)
                 .with_for_update()
             )
-            if document is None or task is None or space is None:
+            if version is None or task is None or space is None:
                 raise IncompleteEmbeddingsError("embedding state does not exist")
 
             eligible = await self._session.scalar(

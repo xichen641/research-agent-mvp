@@ -277,8 +277,15 @@ async def test_task_repository_translates_all_database_failures() -> None:
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_task_update_translates_orm_assignment_failure() -> None:
+async def test_task_update_translates_orm_assignment_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     repository = SqlTaskRepository(cast(AsyncSession, FailingAssignmentSession()))
+
+    async def locked_task(_task_id: object) -> FailingAssignmentModel:
+        return FailingAssignmentModel()
+
+    monkeypatch.setattr(repository, "_lock_active_task", locked_task)
 
     with pytest.raises(TaskPersistenceError) as error:
         await repository.update_task(
